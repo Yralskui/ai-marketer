@@ -1,0 +1,38 @@
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Секреты
+.env
+.env.*
+!.env.example
+
+# Данные приложения: БД, картинки, загрузки
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# IDE и ОС
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Локальные настройки Claude Code (общие правила — в CLAUDE.md)
+.claude/settings.local.json

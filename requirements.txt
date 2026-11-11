@@ -1,0 +1,17 @@
+# Основные зависимости приложения (Python 3.11+)
+aiogram>=3.13,<4
+SQLAlchemy[asyncio]>=2.0.30,<2.1
+aiosqlite>=0.20
+pydantic>=2.7,<3
+pydantic-settings>=2.4,<3
+APScheduler>=3.10,<4
+httpx>=0.27,<1
+openai>=1.40,<3
+pypdf>=4.2
+python-docx>=1.1
+trafilatura>=1.12
+beautifulsoup4>=4.12
+dateparser>=1.2
+Pillow>=10.3
+# Таблица часовых поясов для zoneinfo — обязательна на Windows
+tzdata>=2024.1
