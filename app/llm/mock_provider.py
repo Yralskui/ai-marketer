@@ -1,0 +1,279 @@
+"""Детерминированная заглушка LLM: работает без ключей и интернета.
+
+Зачем: разрабатывать и демонстрировать сквозной сценарий бесплатно, а тесты делать
+стабильными. Поведение выбирается по `task`:
+
+- "agent"           — по ключевым словам выбирает инструмент; после результата
+                      инструмента пишет короткий итоговый ответ;
+- "write_post"      — шаблонный пост по строке «Тема: ...» из user-сообщения;
+- "revise_post"     — простые правки («короче», «эмодзи», «подробнее», ...);
+- "extract_profile" — JSON-профиль бизнеса из сырого текста эвристиками.
+
+⚠️ Mock опирается на формат user-сообщений, которые собирают сервисы
+(строки «Тема:», «Название бизнеса:», блок <<< >>> и «Правка клиента:»).
+Меняете формат в services/posts.py — поправьте и разбор здесь.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from app.llm.base import LLMProvider, LLMResponse, Message, ToolCall
+
+IMAGE_WORDS = ("картин", "фото", "изображ", "иллюстрац", "визуал")
+REVISE_WORDS = ("перепиш", "измени", "исправ", "короч", "сократ", "добав", "убер", "поправ")
+POST_WORDS = ("пост", "напиши", "подготов", "публикац", "анонс", "текст для")
+
+
+class MockLLMProvider(LLMProvider):
+    name = "mock"
+
+    def __init__(self) -> None:
+        self._call_counter = 0
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        task: str | None = None,
+    ) -> LLMResponse:
+        last_user = _last_content(messages, "user")
+        if task == "write_post":
+            return LLMResponse(content=_write_post(last_user))
+        if task == "revise_post":
+            return LLMResponse(content=_revise_post(last_user))
+        if task == "extract_profile" or json_mode:
+            return LLMResponse(content=json.dumps(_extract_profile(last_user), ensure_ascii=False))
+        if tools:
+            return self._agent_step(messages, {t["function"]["name"] for t in tools})
+        return LLMResponse(content="Это ответ mock-LLM. Подключите реальную модель в .env.")
+
+    # ------------------------------------------------------------- agent
+
+    def _agent_step(self, messages: list[Message], available: set[str]) -> LLMResponse:
+        last = messages[-1]
+        if last.get("role") == "tool":
+            tool_name = _find_tool_name(messages, last.get("tool_call_id"))
+            return LLMResponse(content=_summarize_tool_result(tool_name, last.get("content") or ""))
+
+        text = (last.get("content") or "").strip()
+        call = _route(text)
+        if call is None or call[0] not in available:
+            return LLMResponse(content=_help_answer())
+        self._call_counter += 1
+        return LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id=f"call_mock_{self._call_counter}", name=call[0], arguments=call[1])],
+        )
+
+
+# ----------------------------------------------------------------- routing
+
+
+def _route(text: str) -> tuple[str, dict[str, Any]] | None:
+    low = text.lower().replace("ё", "е")
+
+    post_ref = re.search(r"(?:пост|черновик)\w*\s*(?:№|#|номер)?\s*(\d+)", low)
+    if post_ref and any(w in low for w in REVISE_WORDS):
+        return "revise_post", {"post_id": int(post_ref.group(1)), "instruction": text}
+
+    if "контент-план" in low or "контент план" in low or (
+        "план" in low and ("недел" in low or "месяц" in low)
+    ):
+        period = "month" if "месяц" in low else "week"
+        return "create_content_plan", {"period": period}
+
+    if any(w in low for w in ("аналитик", "статистик", "охват", "метрик")):
+        return "get_analytics", {"days": 7}
+
+    if "отчет" in low:
+        return "make_report", {"days": 7}
+
+    if "пост" in low and any(w in low for w in ("покажи", "список", "какие", "мои", "сколько")):
+        return "list_posts", {}
+
+    if "профил" in low or "что ты знаешь" in low or "о нас знаешь" in low:
+        return "get_business_profile", {}
+
+    if any(w in low for w in POST_WORDS):
+        return "create_post_draft", {
+            "topic": _extract_topic(text),
+            "platform": "telegram",
+            "with_image": any(w in low for w in IMAGE_WORDS),
+        }
+    return None
+
+
+def _extract_topic(text: str) -> str:
+    m = re.search(r"\b(?:про|о|об|на тему)\s+(.+)", text, flags=re.IGNORECASE)
+    topic = m.group(1) if m else text
+    topic = re.sub(r"[,.]?\s*(?:с|и)\s+(?:картинк|фото|изображен)\w*.*$", "", topic, flags=re.I)
+    return topic.strip(" .!?\"«»") or "новости компании"
+
+
+def _find_tool_name(messages: list[Message], tool_call_id: str | None) -> str:
+    for msg in reversed(messages):
+        for tc in msg.get("tool_calls") or []:
+            if tc.get("id") == tool_call_id:
+                return tc["function"]["name"]
+    return ""
+
+
+def _summarize_tool_result(tool_name: str, content: str) -> str:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        data = {"raw": content}
+    if isinstance(data, dict) and data.get("error"):
+        return f"Не получилось выполнить действие: {data['error']}"
+    if isinstance(data, dict) and data.get("status") == "in_development":
+        return data.get("message", "Эта функция пока в разработке.")
+
+    if tool_name in ("create_post_draft", "revise_post"):
+        return (
+            f"Готово! Черновик #{data.get('post_id')} отправлен вам на согласование — "
+            "выберите действие кнопками под ним."
+        )
+    if tool_name == "list_posts":
+        posts = data.get("posts", [])
+        if not posts:
+            return "Постов пока нет. Напишите, например: «напиши пост про новое меню»."
+        lines = [f"#{p['id']} · {p['status']} · {p['topic']}" for p in posts]
+        return "Ваши последние посты:\n" + "\n".join(lines)
+    if tool_name == "get_business_profile":
+        if not data.get("filled"):
+            return "Профиль бизнеса пока пуст. Запустите /onboarding и расскажите о себе."
+        profile = data.get("profile", {})
+        return (
+            f"Я знаю, что вы — «{profile.get('name')}». {profile.get('description', '')}\n"
+            "Полный профиль — командой /profile."
+        )
+    if tool_name == "update_business_profile":
+        return "Обновил профиль бизнеса."
+    return "Готово."
+
+
+def _help_answer() -> str:
+    return (
+        "Я ваш AI-маркетолог. Могу, например:\n"
+        "• «Напиши пост про осеннее меню» (добавьте «с картинкой», если нужна)\n"
+        "• «Покажи мои посты»\n"
+        "• «Сделай пост #3 короче»\n"
+        "• «Что ты знаешь о нашем бизнесе?»"
+    )
+
+
+# ----------------------------------------------------------------- generation
+
+
+def _line_value(text: str, label: str, default: str = "") -> str:
+    m = re.search(rf"^{label}:\s*(.+)$", text, flags=re.MULTILINE)
+    return m.group(1).strip() if m else default
+
+
+def _hashtag(value: str) -> str:
+    word = re.sub(r"[^\wа-яА-ЯёЁ]", "", value.split()[0]) if value.split() else "новости"
+    return word.lower() or "новости"
+
+
+def _write_post(user_msg: str) -> str:
+    topic = _line_value(user_msg, "Тема", "новости компании")
+    business = _line_value(user_msg, "Название бизнеса", "Мы")
+    title = topic[:1].upper() + topic[1:]
+    return (
+        f"✨ {title}\n\n"
+        f"{business} делится новостью: {topic}. "
+        "Мы подготовили это специально для вас — с заботой о качестве и деталях.\n\n"
+        "Что вас ждёт:\n"
+        "• внимательный подход к каждому клиенту\n"
+        "• честные цены и понятные условия\n"
+        "• приятные бонусы для постоянных гостей\n\n"
+        "Напишите нам в личные сообщения — расскажем подробности!\n\n"
+        f"#{_hashtag(topic)} #{_hashtag(business)}"
+    )
+
+
+_EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿]️?")
+
+
+def _revise_post(user_msg: str) -> str:
+    m = re.search(r"<<<\n?(.*?)\n?>>>", user_msg, flags=re.DOTALL)
+    text = m.group(1).strip() if m else ""
+    instruction = _line_value(user_msg, "Правка клиента").lower()
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    changed = False
+
+    if any(w in instruction for w in ("короч", "сократ", "кратк")) and len(paragraphs) > 2:
+        paragraphs = [paragraphs[0], paragraphs[1], paragraphs[-1]]
+        changed = True
+    if any(w in instruction for w in ("подробн", "длинн", "больше текст")):
+        paragraphs.insert(-1, "Мы постоянно развиваемся и всегда рады обратной связи от вас.")
+        changed = True
+    if any(w in instruction for w in ("официальн", "без эмодзи", "убери эмодзи", "строже")):
+        paragraphs = [_EMOJI_RE.sub("", p).strip() for p in paragraphs]
+        changed = True
+    elif "эмодзи" in instruction or "смайл" in instruction:
+        icons = ["🔥", "💛", "👉", "🎉", "✅"]
+        paragraphs = [f"{icons[i % len(icons)]} {p}" for i, p in enumerate(paragraphs)]
+        changed = True
+    if not changed and instruction:
+        paragraphs.insert(-1, f"(Учтена правка: {instruction})")
+    return "\n\n".join(paragraphs)
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
+
+
+def _extract_profile(user_msg: str) -> dict[str, Any]:
+    text = user_msg.split("\n", 1)[1] if user_msg.startswith("Материалы") else user_msg
+    sentences = _sentences(text)
+    low_sentences = [s.lower() for s in sentences]
+
+    name = "Мой бизнес"
+    m = re.search(r"[«\"]([^»\"]{2,60})[»\"]", text) or re.search(
+        r"(?:называ\w*|название\s*[:\-—]?)\s*([А-ЯA-Z][^.,\n]{1,60})", text
+    )
+    if m:
+        name = m.group(1).strip()
+
+    def find(*keys: str, default: str = "") -> str:
+        for s, low in zip(sentences, low_sentences, strict=True):
+            if any(k in low for k in keys):
+                return s
+        return default
+
+    products: list[str] = [
+        line.strip(" -•*\t") for line in text.splitlines() if line.strip()[:1] in ("-", "•", "*")
+    ]
+    if not products:
+        line = find("предлага", "продаем", "продаём", "услуг", "в меню", "ассортимент")
+        if ":" in line:
+            line = line.split(":", 1)[1]
+        products = [p.strip(" .") for p in re.split(r",| и ", line) if p.strip(" .")][:8]
+
+    restrictions = [
+        s for s, low in zip(sentences, low_sentences, strict=True)
+        if any(k in low for k in ("нельзя", "не упомина", "запрещ", "не использ", "не пиши"))
+    ]
+    return {
+        "name": name,
+        "description": " ".join(sentences[:2])[:400] if sentences else "",
+        "products": products[:8],
+        "audience": find("аудитор", "клиент", "для кого", "гост", default="Местные жители"),
+        "usp": find("уникальн", "отлича", "лучш", "единствен", default="Качество и внимание к деталям"),
+        "tone": "дружелюбный, на «ты»" if "на ты" in text.lower() else "дружелюбный, на «вы»",
+        "restrictions": restrictions,
+    }
+
+
+def _last_content(messages: list[Message], role: str) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == role:
+            return msg.get("content") or ""
+    return ""
