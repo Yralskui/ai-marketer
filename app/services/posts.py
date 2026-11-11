@@ -76,7 +76,9 @@ def can_transition(old: PostStatus, new: PostStatus) -> bool:
 def transition(post: Post, new: PostStatus) -> None:
     old = PostStatus(post.status)
     if not can_transition(old, new):
-        raise InvalidTransitionError(f"Пост #{post.id}: переход {old.value} -> {new.value} запрещён")
+        raise InvalidTransitionError(
+            f"Пост #{post.id}: переход {old.value} -> {new.value} запрещён"
+        )
     post.status = new
 
 
@@ -174,7 +176,7 @@ async def revise(
 
 def clean_post_text(text: str, platform: Platform) -> str:
     """Убирает кавычки-обёртки и обрезает до жёсткого лимита платформы."""
-    text = text.strip().strip("\"«»").strip()
+    text = text.strip().strip('"«»').strip()
     limit = PLATFORM_HARD_LIMITS[platform]
     if len(text) > limit:
         cut = text[: limit - 1]

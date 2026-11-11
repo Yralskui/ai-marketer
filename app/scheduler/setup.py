@@ -34,12 +34,21 @@ def create_scheduler(container: AppContainer) -> AsyncIOScheduler:
     )
     if settings.enable_auto_drafts:
         scheduler.add_job(
-            jobs.generate_daily_drafts_job, "cron", hour=9, minute=0,
-            id="generate_daily_drafts", **common,
+            jobs.generate_daily_drafts_job,
+            "cron",
+            hour=9,
+            minute=0,
+            id="generate_daily_drafts",
+            **common,
         )
     if settings.enable_weekly_report:
         scheduler.add_job(
-            jobs.weekly_report_job, "cron", day_of_week="mon", hour=10, minute=0,
-            id="weekly_report", **common,
+            jobs.weekly_report_job,
+            "cron",
+            day_of_week="mon",
+            hour=10,
+            minute=0,
+            id="weekly_report",
+            **common,
         )
     return scheduler

@@ -68,7 +68,9 @@ class MockLLMProvider(LLMProvider):
         self._call_counter += 1
         return LLMResponse(
             content=None,
-            tool_calls=[ToolCall(id=f"call_mock_{self._call_counter}", name=call[0], arguments=call[1])],
+            tool_calls=[
+                ToolCall(id=f"call_mock_{self._call_counter}", name=call[0], arguments=call[1])
+            ],
         )
 
 
@@ -82,8 +84,10 @@ def _route(text: str) -> tuple[str, dict[str, Any]] | None:
     if post_ref and any(w in low for w in REVISE_WORDS):
         return "revise_post", {"post_id": int(post_ref.group(1)), "instruction": text}
 
-    if "контент-план" in low or "контент план" in low or (
-        "план" in low and ("недел" in low or "месяц" in low)
+    if (
+        "контент-план" in low
+        or "контент план" in low
+        or ("план" in low and ("недел" in low or "месяц" in low))
     ):
         period = "month" if "месяц" in low else "week"
         return "create_content_plan", {"period": period}
@@ -113,7 +117,7 @@ def _extract_topic(text: str) -> str:
     m = re.search(r"\b(?:про|о|об|на тему)\s+(.+)", text, flags=re.IGNORECASE)
     topic = m.group(1) if m else text
     topic = re.sub(r"[,.]?\s*(?:с|и)\s+(?:картинк|фото|изображен)\w*.*$", "", topic, flags=re.I)
-    return topic.strip(" .!?\"«»") or "новости компании"
+    return topic.strip(' .!?"«»') or "новости компании"
 
 
 def _find_tool_name(messages: list[Message], tool_call_id: str | None) -> str:
@@ -258,7 +262,8 @@ def _extract_profile(user_msg: str) -> dict[str, Any]:
         products = [p.strip(" .") for p in re.split(r",| и ", line) if p.strip(" .")][:8]
 
     restrictions = [
-        s for s, low in zip(sentences, low_sentences, strict=True)
+        s
+        for s, low in zip(sentences, low_sentences, strict=True)
         if any(k in low for k in ("нельзя", "не упомина", "запрещ", "не использ", "не пиши"))
     ]
     return {
@@ -266,7 +271,9 @@ def _extract_profile(user_msg: str) -> dict[str, Any]:
         "description": " ".join(sentences[:2])[:400] if sentences else "",
         "products": products[:8],
         "audience": find("аудитор", "клиент", "для кого", "гост", default="Местные жители"),
-        "usp": find("уникальн", "отлича", "лучш", "единствен", default="Качество и внимание к деталям"),
+        "usp": find(
+            "уникальн", "отлича", "лучш", "единствен", default="Качество и внимание к деталям"
+        ),
         "tone": "дружелюбный, на «ты»" if "на ты" in text.lower() else "дружелюбный, на «вы»",
         "restrictions": restrictions,
     }

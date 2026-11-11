@@ -16,6 +16,7 @@ JSON-схема параметров генерируется из pydantic-мо
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import typing
@@ -30,8 +31,10 @@ log = logging.getLogger(__name__)
 ToolFunc = Callable[[Any, Any], Awaitable[Any]]
 
 
+# Для инструментов без параметров. Без docstring: он попал бы в JSON-схему как description.
+# (Docstring модели аргументов — способ дать LLM общее описание параметров.)
 class EmptyArgs(BaseModel):
-    """Для инструментов без параметров."""
+    pass
 
 
 @dataclass
@@ -122,7 +125,8 @@ def tool(
 
     def decorator(func: ToolFunc) -> ToolFunc:
         args_model = args or _infer_args_model(func)
-        (registry or default_registry).register(
+        # Не `registry or ...`: пустой реестр ложен из-за __len__
+        (registry if registry is not None else default_registry).register(
             ToolSpec(name=name, description=description, args_model=args_model, func=func)
         )
         return func
@@ -131,11 +135,13 @@ def tool(
 
 
 def _infer_args_model(func: ToolFunc) -> type[BaseModel]:
-    hints = typing.get_type_hints(func)
-    hints.pop("return", None)
-    params = list(hints.values())
-    if len(params) >= 2 and isinstance(params[1], type) and issubclass(params[1], BaseModel):
-        return params[1]
+    """Модель аргументов — аннотация второго параметра функции (ctx, args)."""
+    params = list(inspect.signature(func).parameters)
+    if len(params) < 2:
+        return EmptyArgs
+    annotation = typing.get_type_hints(func).get(params[1])
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
     return EmptyArgs
 
 

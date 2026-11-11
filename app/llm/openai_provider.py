@@ -37,7 +37,9 @@ class OpenAIProvider(LLMProvider):
         if not api_key:
             raise ValueError("LLM_API_KEY не задан, а LLM_PROVIDER=openai")
         # Повторы делаем сами (retry_async), встроенные выключаем
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+        self.client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0
+        )
         self.model = model
         self.max_retries = max_retries
         self.temperature = temperature
@@ -79,7 +81,9 @@ class OpenAIProvider(LLMProvider):
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
-                log.warning("Не-JSON аргументы инструмента %s: %r", tc.function.name, tc.function.arguments)
+                log.warning(
+                    "Не-JSON аргументы инструмента %s: %r", tc.function.name, tc.function.arguments
+                )
                 args = {}
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
         return LLMResponse(content=msg.content, tool_calls=tool_calls, raw=resp)

@@ -32,6 +32,10 @@ PROFILE_FIELD_TITLES: dict[str, str] = {
 }
 
 
+class NoSourcesError(ValueError):
+    """У бизнеса ещё нет ни одного материала для профиля."""
+
+
 class BusinessProfile(BaseModel):
     """Структура JSON-поля Business.profile."""
 
@@ -110,7 +114,9 @@ async def build_profile(
     """Собирает профиль из всех источников бизнеса и сохраняет его."""
     sources = await SourceRepo(session).list_for_business(business.id)
     if not sources:
-        raise ValueError("Нет материалов о бизнесе: расскажите о нём текстом, файлом или ссылкой")
+        raise NoSourcesError(
+            "Нет материалов о бизнесе: расскажите о нём текстом, файлом или ссылкой"
+        )
 
     current = get_profile(business)
     system = render_prompt(

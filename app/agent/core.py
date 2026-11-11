@@ -46,7 +46,7 @@ class Agent:
         history_limit: int = 20,
         step_timeout: float = 90.0,
     ) -> None:
-        self.registry = registry or default_registry
+        self.registry = registry if registry is not None else default_registry
         self.max_steps = max_steps
         self.history_limit = history_limit
         self.step_timeout = step_timeout
@@ -73,7 +73,9 @@ class Agent:
 
             if not response.tool_calls:
                 text = (response.content or "").strip() or "Готово."
-                await repo.add(ctx.user_id, MessageRole.ASSISTANT, text, business_id=ctx.business_id)
+                await repo.add(
+                    ctx.user_id, MessageRole.ASSISTANT, text, business_id=ctx.business_id
+                )
                 return AgentResult(text, step, called, list(ctx.created_post_ids))
 
             # Ассистент попросил вызвать инструменты

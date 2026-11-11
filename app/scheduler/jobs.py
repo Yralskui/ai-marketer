@@ -52,8 +52,7 @@ async def publish_due_posts(
                     text += f"\n{post.external_url}"
             else:
                 text = (
-                    f"⚠️ Не удалось опубликовать пост #{post.id}: "
-                    f"{html.escape(outcome.error or '')}"
+                    f"⚠️ Не удалось опубликовать пост #{post.id}: {html.escape(outcome.error or '')}"
                 )
             if notifier and chat_id:
                 try:
@@ -115,9 +114,7 @@ async def _owner_chat_id(session: AsyncSession, business_id: int) -> int | None:
 
 async def publish_due_posts_job(container: AppContainer) -> None:
     try:
-        await publish_due_posts(
-            container.db.sessionmaker, container.publishing, container.notifier
-        )
+        await publish_due_posts(container.db.sessionmaker, container.publishing, container.notifier)
     except Exception:
         log.exception("Сбой задачи publish_due_posts")
 

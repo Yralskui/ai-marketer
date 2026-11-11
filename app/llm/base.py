@@ -35,7 +35,10 @@ class ToolCall:
         return {
             "id": self.id,
             "type": "function",
-            "function": {"name": self.name, "arguments": json.dumps(self.arguments, ensure_ascii=False)},
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
         }
 
 

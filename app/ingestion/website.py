@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from urllib.parse import urljoin, urldefrag, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -16,8 +16,24 @@ log = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (compatible; AIMarketerBot/0.1)"
 URL_RE = re.compile(r"https?://[^\s<>\"']+|(?:www\.)[^\s<>\"']+", re.IGNORECASE)
 # Внутренние страницы, которые обычно полезны для профиля бизнеса
-PRIORITY_HINTS = ("about", "o-nas", "onas", "company", "uslugi", "services", "menu", "catalog",
-                  "price", "prices", "ceny", "контакт", "contacts", "о-нас", "услуги", "меню")
+PRIORITY_HINTS = (
+    "about",
+    "o-nas",
+    "onas",
+    "company",
+    "uslugi",
+    "services",
+    "menu",
+    "catalog",
+    "price",
+    "prices",
+    "ceny",
+    "контакт",
+    "contacts",
+    "о-нас",
+    "услуги",
+    "меню",
+)
 SKIP_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".pdf", ".zip", ".svg", ".webp", ".mp4")
 
 
@@ -41,13 +57,15 @@ def find_url(text: str) -> str | None:
     return url if url.startswith("http") else f"https://{url}"
 
 
-async def fetch_site_text(url: str, max_pages: int = 4, timeout: float = 15.0) -> list[PageText]:
+async def fetch_site_text(
+    url: str, max_pages: int = 4, request_timeout: float = 15.0
+) -> list[PageText]:
     """Главная + до (max_pages-1) внутренних страниц того же домена.
 
     TODO(поток A): sitemap.xml, приоритизация страниц, кэширование.
     """
     async with httpx.AsyncClient(
-        follow_redirects=True, timeout=timeout, headers={"User-Agent": USER_AGENT}
+        follow_redirects=True, timeout=request_timeout, headers={"User-Agent": USER_AGENT}
     ) as client:
         try:
             main_html, final_url = await _get(client, url)

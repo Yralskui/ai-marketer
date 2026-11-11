@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Channel, EventType, Platform, Post, PostStatus
 from app.db.repositories import ChannelRepo, EventLogRepo
-from app.publishers.base import PublishError, Publisher, PublishResult
+from app.publishers.base import Publisher, PublishError, PublishResult
 from app.services.posts import ensure_publishable, transition
 from app.utils.time import utcnow
 

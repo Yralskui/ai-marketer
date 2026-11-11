@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import FSInputFile, Message
 
 from app.db.models import Channel, Platform, Post
-from app.publishers.base import ChannelCheck, PublishError, Publisher, PublishResult
+from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
 from app.services.posts import PLATFORM_HARD_LIMITS, TELEGRAM_CAPTION_LIMIT
 
 log = logging.getLogger(__name__)
