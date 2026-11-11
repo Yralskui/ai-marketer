@@ -16,6 +16,8 @@ ignore = [
     "RUF002",
     "RUF003",
     "B008",
+    "E501",    # длину строк держит `ruff format`; длинные тексты бота не дробим
+    "ASYNC240", # Path.exists() для локальных картинок — мгновенно, to_thread избыточен
 ]
 
 [tool.ruff.lint.isort]
@@ -26,5 +28,6 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning:dateparser.*"]
