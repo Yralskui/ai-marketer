@@ -276,6 +276,18 @@ async def test_end_to_end_bot_flow(settings):
     await feed(bot, msg(OWNER_ID, "/posts"))
     assert f"#{post1}" in fake.sent_texts(OWNER_ID)[-1]
 
+    # Расходы на AI: админ видит все компании и ставит лимит, клиент — нет
+    await feed(bot, msg(OWNER_ID, "/costs"))
+    costs_text = fake.sent_texts(OWNER_ID)[-1]
+    assert "Расходы на AI" in costs_text and "Роза" in costs_text
+    await feed(bot, msg(OWNER_ID, "/budget 500"))
+    assert "500 ₽ в месяц" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, msg(CLIENT_ID, "/budget 1"))
+    assert "только администратору" in fake.sent_texts(CLIENT_ID)[-1]
+    await feed(bot, msg(CLIENT_ID, "/costs"))
+    assert "Роза" in fake.sent_texts(CLIENT_ID)[-1]
+    assert "Зерно" not in fake.sent_texts(CLIENT_ID)[-1]
+
     # Без приглашения посторонний по-прежнему не проходит
     await feed(bot, msg(STRANGER_ID, "/start wrong-invite-code"))
     assert "нет доступа" in fake.sent_texts(STRANGER_ID)[-1]

@@ -268,3 +268,39 @@ ASK_POST_TOPIC = (
 )
 POST_TOPIC_PREFIX = "Напиши пост: "
 ASK_COMPANY_NAME = "🏢 Как называется новая компания? Например: <i>Цветочный салон «Роза»</i>."
+
+
+# --- поток B ---------------------------------------------------- расходы на AI
+
+COSTS_HEADER = "💰 <b>Расходы на AI</b> с {since}\n"
+COSTS_ESTIMATED = "\n<i>~ — часть токенов оценена по длине текста.</i>"
+COSTS_FOOTER_ADMIN = (
+    "\n\nЛимит текущей компании: /budget 500 (₽ в месяц), снять — /budget off.\n"
+    "Цены: LLM_PRICE_INPUT_PER_1M / LLM_PRICE_OUTPUT_PER_1M / IMAGE_PRICE в .env."
+)
+BUDGET_USAGE = "Укажите лимит в рублях на месяц: /budget 500. Снять лимит: /budget off"
+BUDGET_SET = "💰 Лимит для <b>{company}</b>: {budget} ₽ в месяц. Потрачено: {spent:.2f} ₽."
+BUDGET_OFF = "💰 Лимит для <b>{company}</b> снят."
+
+
+def cost_line(
+    business_id: int,
+    name: str,
+    *,
+    calls: int,
+    tokens: int,
+    images: int,
+    cost: float,
+    budget: float | None,
+    estimated: bool,
+    current: bool = False,
+) -> str:
+    mark = "👉 " if current else ""
+    approx = "~" if estimated else ""
+    limit = f" из {budget:.0f} ₽" if budget is not None else ""
+    warn = " ⛔" if budget is not None and cost >= budget else ""
+    tokens_text = f"{tokens:,}".replace(",", " ")
+    return (
+        f"{mark}<b>#{business_id}</b> {escape(name)}: <b>{cost:.2f} ₽</b>{limit}{warn}\n"
+        f"    запросов к AI: {calls}, токенов: {approx}{tokens_text}, картинок: {images}"
+    )

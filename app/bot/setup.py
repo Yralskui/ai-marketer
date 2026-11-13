@@ -29,6 +29,8 @@ ADMIN_COMMANDS = [
     BotCommand(command="companies", description="Компании (админ)"),
     BotCommand(command="new_company", description="Добавить компанию (админ)"),
     BotCommand(command="invite", description="Ссылка-приглашение клиента (админ)"),
+    BotCommand(command="costs", description="Расходы на AI (админ)"),
+    BotCommand(command="budget", description="Лимит расходов компании (админ)"),
     *BOT_COMMANDS[1:],
 ]
 
@@ -42,7 +44,16 @@ def create_bot(settings: Settings) -> Bot:
 
 def create_dispatcher(container: AppContainer) -> Dispatcher:
     # Импорт внутри функции: роутеры — модульные синглтоны, подключаются один раз
-    from app.bot.handlers import admin, approval, chat, companies, menu, onboarding, start
+    from app.bot.handlers import (
+        admin,
+        approval,
+        chat,
+        companies,
+        costs,
+        menu,
+        onboarding,
+        start,
+    )
 
     # TODO(поток B): RedisStorage для FSM, чтобы состояния переживали перезапуск
     dp = Dispatcher(storage=MemoryStorage())
@@ -55,6 +66,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         approval.router,
         admin.router,
         companies.router,
+        costs.router,
         chat.router,  # ПОСЛЕДНИМ: ловит весь оставшийся текст
     )
     return dp

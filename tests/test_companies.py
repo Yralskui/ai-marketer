@@ -181,16 +181,27 @@ def test_normalize_channel_id_rejects_garbage(raw):
         accounts.normalize_channel_id(raw)
 
 
-async def test_outdated_schema_gives_clear_error(tmp_path):
-    """Старый файл БД без новых колонок → понятная ошибка вместо падения на запросе."""
+async def test_old_sqlite_file_gets_new_columns(tmp_path):
+    """Старый файл БД: новые колонки добавляются сами, данные остаются."""
     import sqlite3
 
-    from app.db.base import Database, SchemaOutdatedError
+    from app.db.base import Database
+    from app.db.repositories import UserRepo
 
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as conn:
-        conn.execute("create table users (id integer primary key, telegram_id integer)")
+        conn.execute(
+            "create table users (id integer primary key, telegram_id integer, name varchar,"
+            " role varchar, created_at datetime, updated_at datetime)"
+        )
+        conn.execute(
+            "insert into users values (1, 555, 'Старый', 'owner', '2026-11-01', '2026-11-01')"
+        )
     db = Database(f"sqlite+aiosqlite:///{path.as_posix()}")
-    with pytest.raises(SchemaOutdatedError, match=r"users\.business_id"):
-        await db.create_all()
+    await db.create_all()  # не падает
+    async with db.sessionmaker() as s:
+        user = await UserRepo(s).get_by_telegram_id(555)
+        assert user.name == "Старый"
+        assert user.is_active is True  # значение по умолчанию проставлено
+        assert user.business_id is None
     await db.dispose()

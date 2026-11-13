@@ -13,6 +13,7 @@ from aiogram.types import User as TgUser
 
 from app.bot import texts
 from app.services.accounts import resolve_account
+from app.services.usage import usage_scope
 
 if TYPE_CHECKING:
     from app.container import AppContainer
@@ -66,7 +67,9 @@ class DbSessionMiddleware(BaseMiddleware):
             data["db_user"] = account.user
             data["business"] = account.business
             try:
-                result = await handler(event, data)
+                # Все AI-расходы внутри обновления — на текущую компанию
+                async with usage_scope(session, account.business.id):
+                    result = await handler(event, data)
             except Exception:
                 await session.rollback()
                 raise
