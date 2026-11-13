@@ -17,7 +17,17 @@ from typing import Any
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Chat, Message, MessageOriginChannel, Update, User
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    Message,
+    MessageOriginChannel,
+    MessageReactionCountUpdated,
+    ReactionCount,
+    ReactionTypeEmoji,
+    Update,
+    User,
+)
 
 from app.bot import keyboards as kb
 from app.bot.keyboards import CommentCb, PostCb
@@ -261,6 +271,25 @@ async def test_end_to_end_bot_flow(settings):
     await feed(bot, msg(OWNER_ID, "/comments"))
     overview = fake.sent_texts(OWNER_ID)[-1]
     assert "подключена ✅" in overview and "✅ <b>Анна" in overview
+
+    # ❤️ Telegram прислал счётчик реакций на пост -> 📈 отчёт с цифрами и графиком
+    reaction = Update(
+        update_id=next(_update_ids),
+        message_reaction_count=MessageReactionCountUpdated(
+            chat=CHANNEL_CHAT,
+            message_id=channel_message_id,
+            date=datetime.now(),
+            reactions=[ReactionCount(type=ReactionTypeEmoji(emoji="👍"), total_count=7)],
+        ),
+    )
+    await feed(bot, reaction)
+    fake.clear()
+    await feed(bot, msg(OWNER_ID, kb.MENU_REPORT))
+    photo = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
+    report_text = " ".join(fake.sent_texts(OWNER_ID))
+    assert photo.chat_id == OWNER_ID
+    assert "Отчёт за 7 дн." in report_text and "Реакции: <b>7</b>" in report_text
+    assert "Комментарии: <b>1</b>, отвечено 1" in report_text
 
     # 🕒 Запланировать
     await feed(bot, msg(OWNER_ID, "Подготовь пост про скидки на выходных"))

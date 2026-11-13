@@ -20,6 +20,18 @@ class PostRepo:
     async def get(self, post_id: int) -> Post | None:
         return await self.session.get(Post, post_id)
 
+    async def list_published_since(self, business_id: int, since_utc: datetime) -> list[Post]:
+        result = await self.session.execute(
+            select(Post)
+            .where(
+                Post.business_id == business_id,
+                Post.status == PostStatus.PUBLISHED,
+                Post.published_at >= since_utc,
+            )
+            .order_by(Post.published_at)
+        )
+        return list(result.scalars())
+
     async def find_published(self, channel_id: int, external_id: str) -> Post | None:
         result = await self.session.execute(
             select(Post).where(Post.channel_id == channel_id, Post.external_id == external_id)

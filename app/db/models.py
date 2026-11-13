@@ -341,3 +341,20 @@ class Comment(TimestampMixin, Base):
     reply_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     replied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     auto_replied: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PostMetric(TimestampMixin, Base):
+    """Последние известные показатели опубликованного поста.
+
+    Реакции присылает Telegram (апдейт message_reaction_count, бот — админ канала).
+    Просмотры через Bot API недоступны, поэтому их здесь нет.
+    """
+
+    __tablename__ = "post_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"), unique=True, index=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), index=True)
+    reactions_total: Mapped[int] = mapped_column(Integer, default=0)
+    # {"👍": 5, "🔥": 2}
+    reactions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

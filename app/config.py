@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     enable_auto_drafts: bool = False
     enable_weekly_report: bool = False
     publish_check_interval_seconds: int = 60
+    # 0 — отчёт по понедельникам в 10:00; N > 0 — каждые N минут (для демо автономности)
+    report_interval_minutes: int = 0
     log_level: str = "INFO"
 
     # --- Агент ---

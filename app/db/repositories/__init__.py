@@ -7,6 +7,7 @@ from app.db.repositories.comment import CommentRepo
 from app.db.repositories.content_plan import ContentPlanRepo
 from app.db.repositories.event_log import EventLogRepo
 from app.db.repositories.post import PostRepo
+from app.db.repositories.post_metric import PostMetricRepo
 from app.db.repositories.source import SourceRepo
 from app.db.repositories.user import UserRepo
 
@@ -17,6 +18,7 @@ __all__ = [
     "CommentRepo",
     "ContentPlanRepo",
     "EventLogRepo",
+    "PostMetricRepo",
     "PostRepo",
     "SourceRepo",
     "UserRepo",

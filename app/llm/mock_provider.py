@@ -159,6 +159,13 @@ def _summarize_tool_result(tool_name: str, content: str) -> str:
         )
     if tool_name == "update_business_profile":
         return "Обновил профиль бизнеса."
+    if tool_name == "make_report" and data.get("text"):
+        return str(data["text"])
+    if tool_name == "get_analytics":
+        return (
+            f"За {data.get('period_days', 7)} дн.: опубликовано {data.get('posts_published', 0)}, "
+            f"реакций {data.get('total_reactions', 0)}, комментариев {data.get('comments_total', 0)}."
+        )
     return "Готово."
 
 

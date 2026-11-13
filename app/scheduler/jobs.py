@@ -8,23 +8,29 @@ from __future__ import annotations
 
 import html
 import logging
-from datetime import datetime
+from collections.abc import Awaitable, Callable
+from datetime import datetime, tzinfo
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Business
 from app.db.repositories import BusinessRepo, PostRepo, UserRepo
+from app.llm.base import LLMProvider
 from app.services import content_plan, reports
 from app.services.notifier import Notifier
 from app.services.posts import PublishNotAllowedError
 from app.services.publishing import PublishingService
+from app.services.usage import usage_scope
 from app.utils.time import utcnow
 
 if TYPE_CHECKING:
     from app.container import AppContainer
 
 log = logging.getLogger(__name__)
+
+ReportSender = Callable[[int, reports.Report], Awaitable[None]]
 
 
 async def publish_due_posts(
@@ -83,21 +89,33 @@ async def generate_daily_drafts(
 
 
 async def weekly_report(
-    sessionmaker: async_sessionmaker[AsyncSession], container: AppContainer
+    sessionmaker: async_sessionmaker[AsyncSession],
+    llm: LLMProvider,
+    send_report: ReportSender,
+    *,
+    tz: tzinfo | None = None,
+    days: int = 7,
+    out_dir: Path | None = None,
 ) -> int:
-    """Еженедельный отчёт владельцу. TODO(поток B): отправка текста и графика."""
+    """Отчёт за `days` дней каждой компании — ответственному. Возвращает число отправленных."""
     sent = 0
     async with sessionmaker() as session:
         for business in await BusinessRepo(session).list_all():
-            try:
-                report = await reports.build_report(session, container.llm, business, days=7)
-            except NotImplementedError as exc:
-                log.info("weekly_report: %s", exc)
-                return 0
             chat_id = await _owner_chat_id(session, business.id)
-            if container.notifier and chat_id:
-                await container.notifier.send_text(chat_id, html.escape(report.text))
+            if not chat_id:
+                continue
+            try:
+                async with usage_scope(session, business.id):
+                    report = await reports.build_report(
+                        session, llm, business, days=days, tz=tz, out_dir=out_dir
+                    )
+                await session.commit()
+                await send_report(chat_id, report)
                 sent += 1
+            except Exception:
+                log.exception("Отчёт для компании #%s не отправлен", business.id)
+    if sent:
+        log.info("weekly_report: отправлено отчётов: %d", sent)
     return sent
 
 
@@ -127,7 +145,18 @@ async def generate_daily_drafts_job(container: AppContainer) -> None:
 
 
 async def weekly_report_job(container: AppContainer) -> None:
+    if container.bot is None:
+        return
+    from app.bot.notifier import send_report
+
+    bot = container.bot
+
+    async def sender(chat_id: int, report: reports.Report) -> None:
+        await send_report(bot, chat_id, report)
+
     try:
-        await weekly_report(container.db.sessionmaker, container)
+        await weekly_report(
+            container.db.sessionmaker, container.llm, sender, tz=container.settings.tz
+        )
     except Exception:
         log.exception("Сбой задачи weekly_report")
