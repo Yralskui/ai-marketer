@@ -42,7 +42,7 @@ def create_bot(settings: Settings) -> Bot:
 
 def create_dispatcher(container: AppContainer) -> Dispatcher:
     # Импорт внутри функции: роутеры — модульные синглтоны, подключаются один раз
-    from app.bot.handlers import admin, approval, chat, companies, onboarding, start
+    from app.bot.handlers import admin, approval, chat, companies, menu, onboarding, start
 
     # TODO(поток B): RedisStorage для FSM, чтобы состояния переживали перезапуск
     dp = Dispatcher(storage=MemoryStorage())
@@ -50,6 +50,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
     dp.update.outer_middleware(DbSessionMiddleware(container))
     dp.include_routers(
         start.router,
+        menu.router,  # кнопки меню — раньше онбординга: прерывают любой ввод
         onboarding.router,
         approval.router,
         admin.router,

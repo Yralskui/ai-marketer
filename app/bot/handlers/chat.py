@@ -36,6 +36,19 @@ async def on_text(
     container: AppContainer,
     bot: Bot,
 ) -> None:
+    await ask_agent(message, message.text or "", session, db_user, business, container, bot)
+
+
+async def ask_agent(
+    message: Message,
+    text: str,
+    session: AsyncSession,
+    db_user: User,
+    business: Business,
+    container: AppContainer,
+    bot: Bot,
+) -> None:
+    """Передаёт задачу агенту и отвечает его итоговым текстом."""
     ctx = AgentContext(
         session=session,
         user=db_user,
@@ -48,7 +61,7 @@ async def on_text(
     )
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
         try:
-            result = await container.agent.run(ctx, message.text or "")
+            result = await container.agent.run(ctx, text)
         except AgentError as exc:
             await EventLogRepo(session).log(
                 EventType.AGENT_ERROR, str(exc)[:500], business_id=business.id

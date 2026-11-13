@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
 class PostCb(CallbackData, prefix="post"):
@@ -71,3 +71,39 @@ def companies_keyboard(
         )
     kb.adjust(1)
     return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- главное меню (кнопки снизу)
+
+MENU_NEW_POST = "✍️ Новый пост"
+MENU_POSTS = "📋 Мои посты"
+MENU_PROFILE = "🏢 О компании"
+MENU_MATERIALS = "📚 Материалы"
+MENU_CHANNEL = "📣 Канал"
+MENU_STATUS = "📊 Статус"
+MENU_HELP = "❓ Помощь"
+MENU_COMPANIES = "🗂 Компании"
+MENU_NEW_COMPANY = "➕ Новая компания"
+MENU_INVITE = "🔗 Приглашение"
+
+ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE)
+
+
+def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
+    """Постоянное меню под полем ввода. У администратора — ещё ряд управления компаниями."""
+    kb = ReplyKeyboardBuilder()
+    for text in (MENU_NEW_POST, MENU_POSTS, MENU_PROFILE, MENU_MATERIALS):
+        kb.button(text=text)
+    for text in (MENU_CHANNEL, MENU_STATUS, MENU_HELP):
+        kb.button(text=text)
+    sizes = [2, 2, 3]
+    if admin:
+        for text in ADMIN_MENU_BUTTONS:
+            kb.button(text=text)
+        sizes.append(3)
+    kb.adjust(*sizes)
+    return kb.as_markup(
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Напишите задачу или выберите кнопку",
+    )
