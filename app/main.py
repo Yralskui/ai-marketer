@@ -93,6 +93,7 @@ async def run_bot(settings: Settings) -> None:
             settings.publish_dry_run,
         )
         await bot.set_my_commands(BOT_COMMANDS)
+        await _set_bot_profile(bot)
         for admin_id in settings.allowed_ids:
             try:
                 await bot.set_my_commands(
@@ -107,6 +108,18 @@ async def run_bot(settings: Settings) -> None:
             scheduler.shutdown(wait=False)
         await container.db.dispose()
         await bot.session.close()
+
+
+async def _set_bot_profile(bot) -> None:  # type: ignore[no-untyped-def]
+    """Текст в пустом чате и в профиле бота. Аватарку и картинку описания Bot API
+    ставить не умеет — их загружают в @BotFather (см. README)."""
+    from app.bot import texts
+
+    try:
+        await bot.set_my_description(texts.BOT_DESCRIPTION)
+        await bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION)
+    except Exception:
+        log.warning("Не удалось обновить описание бота", exc_info=True)
 
 
 def main(argv: list[str] | None = None) -> None:

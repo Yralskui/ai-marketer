@@ -19,6 +19,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
+from app.bot import keyboards as kb
 from app.bot.keyboards import PostCb
 from app.bot.setup import create_dispatcher
 from app.container import build_container
@@ -69,10 +70,11 @@ class FakeSession(BaseSession):
     # --- помощники для проверок
 
     def sent_texts(self, chat_id: int | str) -> list[str]:
+        """Тексты сообщений и подписи к фото, отправленные в чат."""
         return [
-            r.text
+            r.text if type(r).__name__ == "SendMessage" else (r.caption or "")
             for r in self.requests
-            if type(r).__name__ == "SendMessage" and str(r.chat_id) == str(chat_id)
+            if type(r).__name__ in ("SendMessage", "SendPhoto") and str(r.chat_id) == str(chat_id)
         ]
 
     def clear(self) -> None:
@@ -143,9 +145,19 @@ async def test_end_to_end_bot_flow(settings):
     await feed(bot, msg(STRANGER_ID, "/start"))
     assert str(STRANGER_ID) in fake.sent_texts(STRANGER_ID)[-1]
 
-    # /start
+    # /start: приветственная картинка + меню кнопками
+    fake.clear()
     await feed(bot, msg(OWNER_ID, "/start"))
     assert "Привет, Урал" in fake.sent_texts(OWNER_ID)[-1]
+    welcome = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
+    menu = [b.text for row in welcome.reply_markup.keyboard for b in row]
+    assert kb.MENU_NEW_POST in menu and kb.MENU_COMPANIES in menu  # у админа — и компании
+
+    # Кнопка меню прерывает онбординг и показывает посты
+    await feed(bot, msg(OWNER_ID, kb.MENU_MATERIALS))
+    assert "Расскажите о вашем бизнесе" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, msg(OWNER_ID, kb.MENU_POSTS))
+    assert "Постов пока нет" in fake.sent_texts(OWNER_ID)[-1]
 
     # Онбординг текстом
     await feed(bot, msg(OWNER_ID, "/onboarding"))
@@ -191,8 +203,10 @@ async def test_end_to_end_bot_flow(settings):
     assert "запланирован" in fake.sent_texts(OWNER_ID)[-1]
     assert await status_of(post2) == PostStatus.SCHEDULED
 
-    # ✏️ Изменить -> новая версия черновика
-    await feed(bot, msg(OWNER_ID, "Напиши пост про новый десерт"))
+    # ✏️ Изменить -> новая версия черновика (пост создаём через кнопку меню)
+    await feed(bot, msg(OWNER_ID, kb.MENU_NEW_POST))
+    assert "О чём пост" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, msg(OWNER_ID, "новый десерт"))
     post3 = last_draft_id(fake)
     fake.clear()
     await feed(bot, press(OWNER_ID, "edit", post3))
@@ -223,8 +237,12 @@ async def test_end_to_end_bot_flow(settings):
     company_b = int(re.search(r"\(#(\d+)\)", created).group(1))
 
     # Клиент подключается по ссылке и видит только свою компанию
+    fake.clear()
     await feed(bot, msg(CLIENT_ID, f"/start {invite.group(1)}"))
     assert "подключены к компании <b>Цветы «Роза»</b>" in fake.sent_texts(CLIENT_ID)[-1]
+    welcome = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
+    client_menu = [b.text for row in welcome.reply_markup.keyboard for b in row]
+    assert kb.MENU_NEW_POST in client_menu and kb.MENU_COMPANIES not in client_menu
     await feed(bot, msg(CLIENT_ID, "/posts"))
     assert "Постов пока нет" in fake.sent_texts(CLIENT_ID)[-1]
     await feed(bot, msg(CLIENT_ID, f"/post {post1}"))

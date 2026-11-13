@@ -69,6 +69,14 @@ Telegram и подсказывает, чего не хватает в `.env`.
      [@getmyid_bot](https://t.me/getmyid_bot). Ещё вариант: открыть канал в web.telegram.org —
      в адресе будет `#-100…`.
 5. Перезапустите бота и выполните `/status`: в строке канала должно быть «✅ бот — администратор».
+6. **Оформление.** Текст описания в пустом чате бот ставит сам при запуске. Картинки Bot API
+   ставить не умеет, их загружают в [@BotFather](https://t.me/BotFather) → `/mybots` → бот →
+   Edit Bot:
+   - **Edit Botpic** → `app/bot/assets/avatar.png` (аватарка);
+   - **Edit Description Picture** → `app/bot/assets/description.png` (картинка в пустом чате
+     над описанием).
+
+   Перерисовать картинки: `python scripts/make_brand_assets.py`.
 
 ## Режимы работы
 
