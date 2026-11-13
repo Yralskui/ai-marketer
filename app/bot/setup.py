@@ -38,6 +38,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="autoreply", description="Автоответ на комментарии (админ)"),
     BotCommand(command="clients", description="Клиенты и доступ (админ)"),
     BotCommand(command="log", description="Журнал действий"),
+    BotCommand(command="brand", description="Бренд-гид компании (админ)"),
     *BOT_COMMANDS[1:],
 ]
 
@@ -57,6 +58,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         admin,
         approval,
         audit,
+        brand,
         chat,
         comments,
         companies,
@@ -83,6 +85,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         companies.router,
         costs.router,
         audit.router,
+        brand.router,
         reports.router,
         chat.router,  # ПОСЛЕДНИМ: ловит весь оставшийся текст
     )

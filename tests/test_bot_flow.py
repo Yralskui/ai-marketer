@@ -565,6 +565,23 @@ async def test_end_to_end_bot_flow(settings, monkeypatch, tmp_path):
     await feed(bot, msg(OWNER_ID, kb.MENU_STATUS))
     assert "Диагностика" in fake.sent_texts(OWNER_ID)[-1]
 
+    # 🎨 Бренд-гид: шаблон Салаватстекла -> проверка поста -> «Исправить по бренд-гиду»
+    fake.clear()
+    await feed(bot, msg(OWNER_ID, kb.MENU_BRAND))
+    assert "Бренд-гид" in fake.sent_texts(OWNER_ID)[-1]
+    preset = button_data(last_markup(fake), lambda b: b.callback_data.startswith("brand:preset"))
+    await feed(bot, press_data(OWNER_ID, preset))
+    assert "MultiComfort° Light Blue 55/38" in fake.sent_texts(OWNER_ID)[-1]
+    fake.clear()
+    await feed(bot, msg(OWNER_ID, "Напиши пост про стекло multicomfort"))
+    card = next(t for t in reversed(fake.sent_texts(OWNER_ID)) if "Куда:" in t)
+    assert "Проверка бренд-гида" in card and "MultiComfort°" in card
+    fix = button_data(last_markup(fake), lambda b: b.callback_data.startswith("post:brandfix"))
+    brand_post = last_draft_id(fake)
+    await feed(bot, press_data(OWNER_ID, fix))
+    assert last_draft_id(fake) == brand_post
+    assert await status_of(brand_post) == PostStatus.PENDING_APPROVAL
+
     # Без приглашения посторонний по-прежнему не проходит
     await feed(bot, msg(STRANGER_ID, "/start wrong-invite-code"))
     assert "нет доступа" in fake.sent_texts(STRANGER_ID)[-1]

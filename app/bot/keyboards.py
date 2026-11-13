@@ -28,8 +28,13 @@ class CancelCb(CallbackData, prefix="cancel"):
     pass
 
 
-def draft_keyboard(post_id: int) -> InlineKeyboardMarkup:
+def draft_keyboard(post_id: int, *, brand_fix: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if brand_fix:
+        kb.button(
+            text="🛠 Исправить по бренд-гиду",
+            callback_data=PostCb(action="brandfix", post_id=post_id),
+        )
     kb.button(
         text="✅ Опубликовать сейчас", callback_data=PostCb(action="publish", post_id=post_id)
     )
@@ -37,7 +42,7 @@ def draft_keyboard(post_id: int) -> InlineKeyboardMarkup:
     kb.button(text="✏️ Изменить", callback_data=PostCb(action="edit", post_id=post_id))
     kb.button(text="🖼 Своё фото", callback_data=PostCb(action="photo", post_id=post_id))
     kb.button(text="❌ Отклонить", callback_data=PostCb(action="reject", post_id=post_id))
-    kb.adjust(1, 2, 2)
+    kb.adjust(*([1] if brand_fix else []), 1, 2, 2)
     return kb.as_markup()
 
 
@@ -98,6 +103,7 @@ MENU_INVITE = "🔗 Приглашение"
 MENU_COSTS = "💰 Расходы"
 MENU_CLIENTS = "👥 Клиенты"
 MENU_LOG = "📜 Журнал"
+MENU_BRAND = "🎨 Бренд-гид"
 
 ADMIN_MENU_BUTTONS = (
     MENU_COMPANIES,
@@ -106,6 +112,7 @@ ADMIN_MENU_BUTTONS = (
     MENU_CLIENTS,
     MENU_COSTS,
     MENU_LOG,
+    MENU_BRAND,
 )
 
 
@@ -120,7 +127,7 @@ def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)
-        sizes += [3, 3]
+        sizes += [3, 3, 1]
     kb.adjust(*sizes)
     return kb.as_markup(
         resize_keyboard=True,
@@ -367,3 +374,28 @@ def channel_picker_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+# --- поток B ---------------------------------------------------- бренд-гид
+
+
+class BrandCb(CallbackData, prefix="brand"):
+    """action: upload | preset (value — код шаблона) | clear."""
+
+    action: str
+    value: str = ""
+
+
+def brand_keyboard(
+    presets: list[tuple[str, str]], *, admin: bool, filled: bool
+) -> InlineKeyboardMarkup | None:
+    if not admin:
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📄 Загрузить брендбук или правила", callback_data=BrandCb(action="upload"))
+    for code, title in presets:
+        kb.button(text=f"✨ Шаблон: {title}", callback_data=BrandCb(action="preset", value=code))
+    if filled:
+        kb.button(text="🧹 Очистить", callback_data=BrandCb(action="clear"))
+    kb.adjust(1)
+    return kb.as_markup()
