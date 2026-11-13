@@ -16,9 +16,8 @@ from app.bot.keyboards import PostCb, cancel_keyboard
 from app.bot.states import ApprovalStates
 from app.container import AppContainer
 from app.db.models import Business, Post, PostStatus, User
-from app.db.repositories import PostRepo
 from app.llm.base import LLMError
-from app.services import approval, posts
+from app.services import accounts, approval, posts
 from app.services.posts import STATUS_TITLES, InvalidTransitionError
 from app.utils.time import DateParseError, format_local, parse_schedule_time
 
@@ -41,9 +40,13 @@ ACTION_STATUSES: dict[str, set[PostStatus]] = {
 
 
 async def _load_post(
-    callback: CallbackQuery, callback_data: PostCb, session: AsyncSession, business: Business
+    callback: CallbackQuery,
+    callback_data: PostCb,
+    session: AsyncSession,
+    db_user: User,
+    business: Business,
 ) -> Post | None:
-    post = await PostRepo(session).get_for_business(callback_data.post_id, business.id)
+    post = await accounts.get_accessible_post(session, db_user, business, callback_data.post_id)
     if post is None:
         await callback.answer(texts.POST_NOT_FOUND, show_alert=True)
         return None
@@ -76,7 +79,7 @@ async def on_publish(
     business: Business,
     container: AppContainer,
 ) -> None:
-    post = await _load_post(callback, callback_data, session, business)
+    post = await _load_post(callback, callback_data, session, db_user, business)
     if post is None or not isinstance(callback.message, Message):
         return
     await callback.answer(texts.PUBLISHING)
@@ -101,10 +104,11 @@ async def on_schedule(
     callback_data: PostCb,
     state: FSMContext,
     session: AsyncSession,
+    db_user: User,
     business: Business,
     container: AppContainer,
 ) -> None:
-    post = await _load_post(callback, callback_data, session, business)
+    post = await _load_post(callback, callback_data, session, db_user, business)
     if post is None or not isinstance(callback.message, Message):
         return
     await state.set_state(ApprovalStates.waiting_schedule_time)
@@ -127,7 +131,7 @@ async def on_schedule_time(
     bot: Bot,
 ) -> None:
     data = await state.get_data()
-    post = await PostRepo(session).get_for_business(data.get("post_id", 0), business.id)
+    post = await accounts.get_accessible_post(session, db_user, business, data.get("post_id", 0))
     if post is None:
         await state.clear()
         await message.answer(texts.POST_NOT_FOUND)
@@ -161,9 +165,10 @@ async def on_edit(
     callback_data: PostCb,
     state: FSMContext,
     session: AsyncSession,
+    db_user: User,
     business: Business,
 ) -> None:
-    post = await _load_post(callback, callback_data, session, business)
+    post = await _load_post(callback, callback_data, session, db_user, business)
     if post is None or not isinstance(callback.message, Message):
         return
     await state.set_state(ApprovalStates.waiting_revision)
@@ -180,12 +185,13 @@ async def on_revision_text(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
+    db_user: User,
     business: Business,
     container: AppContainer,
     bot: Bot,
 ) -> None:
     data = await state.get_data()
-    post = await PostRepo(session).get_for_business(data.get("post_id", 0), business.id)
+    post = await accounts.get_accessible_post(session, db_user, business, data.get("post_id", 0))
     await state.clear()
     if post is None:
         await message.answer(texts.POST_NOT_FOUND)
@@ -193,7 +199,8 @@ async def on_revision_text(
     await message.answer(texts.REVISING)
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
         try:
-            await posts.revise(session, container.llm, business, post, message.text or "")
+            post_business = await accounts.business_of(session, post, business)
+            await posts.revise(session, container.llm, post_business, post, message.text or "")
         except (InvalidTransitionError, LLMError) as exc:
             await message.answer(escape(str(exc)))
             return
@@ -211,7 +218,7 @@ async def on_reject(
     db_user: User,
     business: Business,
 ) -> None:
-    post = await _load_post(callback, callback_data, session, business)
+    post = await _load_post(callback, callback_data, session, db_user, business)
     if post is None or not isinstance(callback.message, Message):
         return
     await approval.reject(session, post, db_user)

@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from sqlalchemy import DateTime, MetaData
+from sqlalchemy import DateTime, MetaData, inspect
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -76,9 +76,30 @@ class Database:
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            missing = await conn.run_sync(_missing_columns)
+        if missing:
+            raise SchemaOutdatedError(
+                "Схема БД устарела, нет колонок: "
+                + ", ".join(missing)
+                + ". Миграций пока нет: удалите файл базы (по умолчанию data/app.db) "
+                "и запустите снова."
+            )
 
     async def dispose(self) -> None:
         await self.engine.dispose()
+
+
+class SchemaOutdatedError(RuntimeError):
+    """Файл БД создан старой версией кода: create_all не добавляет новые колонки."""
+
+
+def _missing_columns(sync_conn) -> list[str]:  # type: ignore[no-untyped-def]
+    inspector = inspect(sync_conn)
+    missing = []
+    for table in Base.metadata.sorted_tables:
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        missing += [f"{table.name}.{c.name}" for c in table.columns if c.name not in existing]
+    return missing
 
 
 def _ensure_sqlite_dir(url: str) -> None:

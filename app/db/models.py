@@ -22,7 +22,9 @@ from app.db.base import Base, TimestampMixin, str_enum
 
 
 class UserRole(StrEnum):
+    # Представитель компании (клиент): работает только со своей компанией
     OWNER = "owner"
+    # Администратор (поставщик услуги): из ALLOWED_USER_IDS, видит все компании
     ADMIN = "admin"
     MEMBER = "member"
 
@@ -81,6 +83,9 @@ class EventType(StrEnum):
     PROFILE_UPDATED = "profile_updated"
     SOURCE_ADDED = "source_added"
     AGENT_ERROR = "agent_error"
+    COMPANY_CREATED = "company_created"
+    CLIENT_JOINED = "client_joined"
+    CHANNEL_CHANGED = "channel_changed"
 
 
 # ---------------------------------------------------------------- models
@@ -93,20 +98,35 @@ class User(TimestampMixin, Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255), default="")
     role: Mapped[UserRole] = mapped_column(str_enum(UserRole), default=UserRole.OWNER)
+    # Компания, с которой пользователь работает сейчас: у клиента — его компания,
+    # у администратора — выбранная командой /companies
+    business_id: Mapped[int | None] = mapped_column(
+        ForeignKey("businesses.id", use_alter=True), nullable=True
+    )
+    # False — доступ отозван администратором
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    businesses: Mapped[list[Business]] = relationship(back_populates="owner")
+    businesses: Mapped[list[Business]] = relationship(
+        back_populates="owner", foreign_keys="Business.owner_id"
+    )
 
 
 class Business(TimestampMixin, Base):
     __tablename__ = "businesses"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Кто согласует посты и получает уведомления: клиент, а пока он не подключился —
+    # администратор, создавший компанию
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), default="Мой бизнес")
     # Структура — app/services/business_profile.py::BusinessProfile
     profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Код для ссылки-приглашения t.me/<bot>?start=<код>; None — приглашения нет
+    invite_code: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, nullable=True
+    )
 
-    owner: Mapped[User] = relationship(back_populates="businesses")
+    owner: Mapped[User] = relationship(back_populates="businesses", foreign_keys=[owner_id])
     raw_sources: Mapped[list[Source]] = relationship(back_populates="business")
     channels: Mapped[list[Channel]] = relationship(back_populates="business")
 

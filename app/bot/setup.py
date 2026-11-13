@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
-from app.bot.middlewares import AccessMiddleware, DbSessionMiddleware
+from app.bot.middlewares import DbSessionMiddleware
 from app.config import Settings
 from app.container import AppContainer
 
@@ -17,9 +17,19 @@ BOT_COMMANDS = [
     BotCommand(command="onboarding", description="Рассказать о бизнесе"),
     BotCommand(command="profile", description="Профиль бизнеса"),
     BotCommand(command="posts", description="Посты и статусы"),
+    BotCommand(command="channel", description="Канал для публикаций"),
     BotCommand(command="status", description="Диагностика"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),
+]
+
+# Администраторам дополнительно показываем команды управления компаниями
+ADMIN_COMMANDS = [
+    *BOT_COMMANDS[:1],
+    BotCommand(command="companies", description="Компании (админ)"),
+    BotCommand(command="new_company", description="Добавить компанию (админ)"),
+    BotCommand(command="invite", description="Ссылка-приглашение клиента (админ)"),
+    *BOT_COMMANDS[1:],
 ]
 
 
@@ -32,18 +42,18 @@ def create_bot(settings: Settings) -> Bot:
 
 def create_dispatcher(container: AppContainer) -> Dispatcher:
     # Импорт внутри функции: роутеры — модульные синглтоны, подключаются один раз
-    from app.bot.handlers import admin, approval, chat, onboarding, start
+    from app.bot.handlers import admin, approval, chat, companies, onboarding, start
 
     # TODO(поток B): RedisStorage для FSM, чтобы состояния переживали перезапуск
     dp = Dispatcher(storage=MemoryStorage())
     dp["container"] = container
-    dp.update.outer_middleware(AccessMiddleware(container.settings.allowed_ids))
     dp.update.outer_middleware(DbSessionMiddleware(container))
     dp.include_routers(
         start.router,
         onboarding.router,
         approval.router,
         admin.router,
+        companies.router,
         chat.router,  # ПОСЛЕДНИМ: ловит весь оставшийся текст
     )
     return dp

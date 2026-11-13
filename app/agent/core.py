@@ -53,7 +53,7 @@ class Agent:
 
     async def run(self, ctx: AgentContext, user_text: str) -> AgentResult:
         repo = AgentMessageRepo(ctx.session)
-        history = await repo.last_n(ctx.user_id, self.history_limit)
+        history = await repo.last_n(ctx.user_id, self.history_limit, business_id=ctx.business_id)
 
         messages: list[Message] = [{"role": "system", "content": self._system_prompt(ctx)}]
         messages += _history_to_messages(history)

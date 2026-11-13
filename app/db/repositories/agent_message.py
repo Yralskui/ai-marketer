@@ -36,12 +36,16 @@ class AgentMessageRepo:
         await self.session.flush()
         return msg
 
-    async def last_n(self, user_id: int, n: int) -> list[AgentMessage]:
-        """Последние n сообщений в хронологическом порядке."""
-        result = await self.session.execute(
-            select(AgentMessage)
-            .where(AgentMessage.user_id == user_id)
-            .order_by(AgentMessage.id.desc())
-            .limit(n)
-        )
+    async def last_n(
+        self, user_id: int, n: int, *, business_id: int | None = None
+    ) -> list[AgentMessage]:
+        """Последние n сообщений в хронологическом порядке.
+
+        С business_id — только диалог по этой компании: администратор, переключаясь
+        между компаниями, не должен тащить в контекст чужую историю.
+        """
+        query = select(AgentMessage).where(AgentMessage.user_id == user_id)
+        if business_id is not None:
+            query = query.where(AgentMessage.business_id == business_id)
+        result = await self.session.execute(query.order_by(AgentMessage.id.desc()).limit(n))
         return list(reversed(list(result.scalars())))

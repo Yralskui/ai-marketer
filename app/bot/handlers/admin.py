@@ -51,7 +51,7 @@ async def cmd_status(
     message: Message, session: AsyncSession, business: Business, container: AppContainer
 ) -> None:
     settings = container.settings
-    channel_text = "не задан (TELEGRAM_CHANNEL_ID)"
+    channel_text = "не задан — подключите командой /channel"
     channel = await ChannelRepo(session).get_active(business.id, Platform.TELEGRAM)
     publisher = container.publishing.get_publisher(Platform.TELEGRAM)
     if channel is not None:
@@ -68,6 +68,7 @@ async def cmd_status(
 
     await message.answer(
         texts.status_report(
+            company=f"{escape(business.name)} (#{business.id})",
             llm=container.llm.name,
             model=settings.llm_model if container.llm.name != "mock" else "заглушка",
             images=container.images.name,

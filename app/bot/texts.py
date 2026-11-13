@@ -32,6 +32,7 @@ HELP = (
     "/profile — профиль бизнеса\n"
     "/posts — последние посты и статусы\n"
     "/post N — открыть пост №N\n"
+    "/channel — Telegram-канал для публикаций\n"
     "/status — диагностика\n"
     "/cancel — отменить текущее действие"
 )
@@ -39,8 +40,8 @@ CANCELLED = "Отменено. Чем ещё помочь?"
 NOTHING_TO_CANCEL = "Нечего отменять 🙂"
 ACCESS_DENIED = (
     "⛔ У вас нет доступа к этому боту.\n"
-    "Ваш Telegram ID: <code>{user_id}</code> — передайте его администратору "
-    "(переменная ALLOWED_USER_IDS)."
+    "Попросите у администратора ссылку-приглашение для вашей компании.\n"
+    "Ваш Telegram ID: <code>{user_id}</code>."
 )
 UNKNOWN_COMMAND = "Не знаю такой команды. Список команд — /help"
 UNSUPPORTED_MESSAGE = "Я понимаю текст и документы (PDF, DOCX, TXT). Подробнее — /help"
@@ -158,6 +159,7 @@ def posts_list(posts: list[Post], tz: tzinfo) -> str:
 
 def status_report(
     *,
+    company: str,
     llm: str,
     model: str,
     images: str,
@@ -178,7 +180,66 @@ def status_report(
         f"Картинки: <code>{escape(images)}</code>\n"
         f"Инструментов у агента: {tools}\n"
         f"Режим DRY-RUN: {'включён — в канал ничего не уходит' if dry_run else 'выключен'}\n"
+        f"Компания: {company}\n"
         f"Telegram-канал: {channel}\n\n"
         f"<b>Посты</b>\n{counts_text}\n\n"
         f"<b>Планировщик</b>\n{jobs_text}"
     )
+
+
+# --- поток B ---------------------------------------------------- компании и каналы
+
+START_JOINED = "🤝 Вы подключены к компании <b>{company}</b>.\n\n"
+START_ADMIN = (
+    "\n\n🛠 Вы администратор. Текущая компания: <b>{company}</b> (#{id}).\n"
+    "/companies — все компании, /new_company — добавить, /invite — ссылка для клиента."
+)
+ADMIN_ONLY = "Эта команда доступна только администратору."
+COMPANY_CREATED = (
+    "🏢 Компания <b>{company}</b> (#{id}) создана, вы переключены на неё.\n\n"
+    "Дальше:\n"
+    "1. /onboarding — загрузите сведения о компании (текст, файлы, сайт).\n"
+    "2. /channel @канал — подключите Telegram-канал компании "
+    "(бот должен быть в нём администратором).\n"
+    "3. Отправьте клиенту ссылку-приглашение:\n{link}"
+)
+COMPANY_SWITCHED = (
+    "Теперь вы работаете с компанией <b>{company}</b> (#{id}). "
+    "Посты, профиль и диалог — только этой компании."
+)
+COMPANIES_HEADER = "<b>Компании</b>\n"
+COMPANIES_FOOTER = "\n\nПереключиться — кнопкой ниже или /use N. Новая — /new_company Название"
+USE_USAGE = "Укажите номер компании: /use 2. Список — /companies"
+INVITE = (
+    "🔗 Ссылка-приглашение для клиента компании <b>{company}</b>:\n{link}\n\n"
+    "Клиент откроет её, нажмёт «Запустить» и получит доступ только к этой компании.\n"
+    "Новая ссылка (старая перестанет работать): /invite new"
+)
+CHANNEL_CURRENT = (
+    "Канал компании <b>{company}</b>: {channel}\n\n"
+    "Сменить: /channel @username или /channel -100XXXXXXXXXX.\n"
+    "Бот должен быть администратором канала с правом публиковать сообщения."
+)
+CHANNEL_NOT_SET = "не подключён"
+CHANNEL_SAVED = "📣 Канал {channel} подключён к компании <b>{company}</b>."
+CHANNEL_CHECK = "\nПроверка: {mark} {message}"
+
+
+def start_for(
+    name: str, profile_filled: bool, company: str, business_id: int, *, joined: bool, admin: bool
+) -> str:
+    text = start(name, profile_filled)
+    if joined:
+        text = START_JOINED.format(company=escape(company)) + text
+    if admin:
+        text += START_ADMIN.format(company=escape(company), id=business_id)
+    return text
+
+
+def company_line(
+    business_id: int, name: str, clients: list[str], channel: str | None, current: bool
+) -> str:
+    mark = "👉 " if current else ""
+    who = ", ".join(escape(c) for c in clients) if clients else "клиент не подключён"
+    where = f"<code>{escape(channel)}</code>" if channel else "канал не задан"
+    return f"{mark}<b>#{business_id}</b> {escape(name)} — {who}; {where}"

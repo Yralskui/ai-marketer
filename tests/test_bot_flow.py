@@ -28,6 +28,7 @@ from app.scheduler.setup import create_scheduler
 
 OWNER_ID = 111
 STRANGER_ID = 666
+CLIENT_ID = 222
 
 
 class FakeSession(BaseSession):
@@ -212,5 +213,53 @@ async def test_end_to_end_bot_flow(settings):
     assert "Диагностика" in status_text and "mock" in status_text
     await feed(bot, msg(OWNER_ID, "/unknown"))
     assert "Не знаю такой команды" in fake.sent_texts(OWNER_ID)[-1]
+
+    # ---------------- вторая компания без кода (критерии 9 и 11)
+    await feed(bot, msg(OWNER_ID, "/new_company Цветы «Роза»"))
+    created = fake.sent_texts(OWNER_ID)[-1]
+    assert "Роза" in created and "создана" in created
+    invite = re.search(r"https://t\.me/test_bot\?start=([A-Za-z0-9_-]+)", created)
+    assert invite, created
+    company_b = int(re.search(r"\(#(\d+)\)", created).group(1))
+
+    # Клиент подключается по ссылке и видит только свою компанию
+    await feed(bot, msg(CLIENT_ID, f"/start {invite.group(1)}"))
+    assert "подключены к компании <b>Цветы «Роза»</b>" in fake.sent_texts(CLIENT_ID)[-1]
+    await feed(bot, msg(CLIENT_ID, "/posts"))
+    assert "Постов пока нет" in fake.sent_texts(CLIENT_ID)[-1]
+    await feed(bot, msg(CLIENT_ID, f"/post {post1}"))
+    assert "не найден" in fake.sent_texts(CLIENT_ID)[-1]
+
+    # Кнопка под чужим постом не работает
+    fake.clear()
+    await feed(bot, press(CLIENT_ID, "reject", post2))
+    answers = [r for r in fake.requests if type(r).__name__ == "AnswerCallbackQuery"]
+    assert answers and "не найден" in (answers[-1].text or "")
+    assert await status_of(post2) == PostStatus.SCHEDULED
+
+    # Управление компаниями — только администратору
+    await feed(bot, msg(CLIENT_ID, "/companies"))
+    assert "только администратору" in fake.sent_texts(CLIENT_ID)[-1]
+
+    # Клиент подключает свой канал
+    await feed(bot, msg(CLIENT_ID, "/channel t.me/roza_flowers"))
+    assert "<code>@roza_flowers</code> подключён" in fake.sent_texts(CLIENT_ID)[-1]
+
+    # Администратор видит обе компании и переключается между ними
+    await feed(bot, msg(OWNER_ID, "/companies"))
+    listing = fake.sent_texts(OWNER_ID)[-1]
+    assert "Роза" in listing and "@roza_flowers" in listing and "@test_channel" in listing
+    await feed(bot, msg(OWNER_ID, "/posts"))
+    assert "Постов пока нет" in fake.sent_texts(OWNER_ID)[-1]  # сейчас выбрана компания B
+    async with container.db.sessionmaker() as s:
+        company_a = (await PostRepo(s).get(post1)).business_id
+    assert company_a != company_b
+    await feed(bot, msg(OWNER_ID, f"/use {company_a}"))
+    await feed(bot, msg(OWNER_ID, "/posts"))
+    assert f"#{post1}" in fake.sent_texts(OWNER_ID)[-1]
+
+    # Без приглашения посторонний по-прежнему не проходит
+    await feed(bot, msg(STRANGER_ID, "/start wrong-invite-code"))
+    assert "нет доступа" in fake.sent_texts(STRANGER_ID)[-1]
 
     await container.db.dispose()
