@@ -111,8 +111,11 @@ async def run_bot(settings: Settings) -> None:
 
 
 async def _set_bot_profile(bot) -> None:  # type: ignore[no-untyped-def]
-    """Текст в пустом чате и в профиле бота. Аватарку и картинку описания Bot API
-    ставить не умеет — их загружают в @BotFather (см. README)."""
+    """Текст в пустом чате, короткое описание и аватарка бота.
+
+    Картинку над описанием в пустом чате Bot API ставить не умеет — её загружают в
+    @BotFather (см. README).
+    """
     from app.bot import texts
 
     try:
@@ -120,6 +123,35 @@ async def _set_bot_profile(bot) -> None:  # type: ignore[no-untyped-def]
         await bot.set_my_short_description(texts.BOT_SHORT_DESCRIPTION)
     except Exception:
         log.warning("Не удалось обновить описание бота", exc_info=True)
+    try:
+        await ensure_avatar(bot)
+    except Exception:
+        log.warning("Не удалось поставить аватарку бота", exc_info=True)
+
+
+async def ensure_avatar(bot) -> bool:  # type: ignore[no-untyped-def]
+    """Ставит аватарку из app/bot/assets/avatar.png, если у бота её ещё нет.
+
+    Только при отсутствии: каждая загрузка добавляет фото в историю профиля, а свою
+    аватарку из BotFather мы не перетираем. Возвращает True, если поставили.
+    """
+    import io
+    from pathlib import Path
+
+    from aiogram.types import BufferedInputFile, InputProfilePhotoStatic
+    from PIL import Image
+
+    me = await bot.me()
+    if (await bot.get_user_profile_photos(me.id, limit=1)).total_count:
+        return False
+    avatar = Path(__file__).resolve().parent / "bot" / "assets" / "avatar.png"
+    buf = io.BytesIO()
+    Image.open(avatar).convert("RGB").save(buf, "JPEG", quality=92)  # Telegram ждёт JPG
+    await bot.set_my_profile_photo(
+        photo=InputProfilePhotoStatic(photo=BufferedInputFile(buf.getvalue(), "avatar.jpg"))
+    )
+    log.info("Аватарка бота установлена")
+    return True
 
 
 def main(argv: list[str] | None = None) -> None:

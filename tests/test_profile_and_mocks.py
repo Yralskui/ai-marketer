@@ -61,3 +61,37 @@ def test_scheduler_jobs_follow_flags(settings):
     settings.enable_weekly_report = True
     ids = {j.id for j in create_scheduler(container).get_jobs()}
     assert ids == {"publish_due_posts", "generate_daily_drafts", "weekly_report"}
+
+
+class _AvatarBot:
+    """Заглушка бота: считает загрузки аватарки."""
+
+    def __init__(self, existing: int) -> None:
+        self.existing = existing
+        self.uploaded: list[bytes] = []
+
+    async def me(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=1)
+
+    async def get_user_profile_photos(self, user_id: int, limit: int = 1):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(total_count=self.existing)
+
+    async def set_my_profile_photo(self, photo) -> bool:
+        self.uploaded.append(photo.photo.data)
+        return True
+
+
+async def test_avatar_is_set_only_when_missing():
+    from app.main import ensure_avatar
+
+    empty = _AvatarBot(existing=0)
+    assert await ensure_avatar(empty) is True
+    assert empty.uploaded and empty.uploaded[0][:2] == b"\xff\xd8"  # JPEG
+
+    has_photo = _AvatarBot(existing=1)
+    assert await ensure_avatar(has_photo) is False
+    assert has_photo.uploaded == []
