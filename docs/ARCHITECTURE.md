@@ -10,7 +10,7 @@ flowchart TB
     end
 
     subgraph BOT[app/bot — тонкий UI]
-        MW[middlewares<br/>доступ + сессия БД]
+        MW[middlewares<br/>сессия БД + доступ + компания]
         H[handlers<br/>start · onboarding · approval · admin · chat]
         N[BotNotifier]
     end
