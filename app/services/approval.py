@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import EventType, Post, PostStatus, User
 from app.db.repositories import EventLogRepo
 from app.services.notifier import Notifier
-from app.services.posts import transition
+from app.services.posts import STATUS_TITLES, transition
 from app.services.publishing import PublishingService, PublishOutcome
 from app.utils.time import to_utc_naive, utcnow
 
@@ -79,7 +79,21 @@ async def schedule(session: AsyncSession, post: Post, when: datetime, user: User
 async def approve_and_publish(
     session: AsyncSession, post: Post, user: User, publishing: PublishingService
 ) -> PublishOutcome:
-    """Кнопка «Опубликовать сейчас»."""
-    await approve(session, post, user)
-    await session.commit()
-    return await publishing.publish(session, post)
+    """Кнопка «Опубликовать сейчас».
+
+    Под блокировкой поста и со свежим статусом из БД: двойное нажатие не одобрит и не
+    опубликует пост второй раз, а опубликованный пост не вернётся в approved.
+    """
+    async with publishing.post_lock(post.id):
+        await session.refresh(post)
+        if post.status not in (PostStatus.PENDING_APPROVAL, PostStatus.FAILED, PostStatus.APPROVED):
+            return PublishOutcome(
+                ok=False,
+                post=post,
+                error=f"пост уже {STATUS_TITLES.get(PostStatus(post.status), post.status)}",
+                skipped=True,
+            )
+        if post.status != PostStatus.APPROVED:
+            await approve(session, post, user)
+        await session.commit()
+        return await publishing.publish(session, post)
