@@ -22,6 +22,8 @@ from app.llm.base import LLMError, LLMProvider
 
 MAX_SOURCE_CHARS = 15000
 MIN_TERM_LEN = 3
+# Перед названием — организационно-правовая форма: АО «Салаватстекло», ООО «Салаватстекло Каспий»
+LEGAL_NAME_RE = re.compile(r"(?<![\w])(?:АО|ООО|ПАО|ЗАО|ОАО|ИП)\s*«$")
 
 
 class BrandGuide(BaseModel):
@@ -146,13 +148,16 @@ def check_text(text: str, guide: BrandGuide) -> list[str]:
         seen.add(token.lower())
         for match in _term_pattern(token).finditer(text):
             found = match.group(0)
-            before = text[max(0, match.start() - 4) : match.start()]
+            before = text[max(0, match.start() - 8) : match.start()]
+            if before.endswith("#"):  # хештег: знаки ° и ® в нём невозможны — не ошибка
+                continue
+            legal = LEGAL_NAME_RE.search(before) is not None
             if found == token:
-                if before.endswith(("«", '"')) and not before.endswith("АО «"):
+                if before.endswith(("«", '"')) and not legal:
                     issues.append(f"«{token}» — без кавычек")
                     break
                 continue
-            if before.endswith("АО «"):  # юридическое наименование пишется иначе — это можно
+            if legal:  # юридическое наименование (АО «…», ООО «…») пишется иначе — это можно
                 continue
             issues.append(f"пишите «{token}», а не «{found}»")
             break
