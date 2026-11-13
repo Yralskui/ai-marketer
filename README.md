@@ -104,6 +104,52 @@ ruff format --check .
 
 ---
 
+## Деплой на сервер (Docker)
+
+Бот работает 24/7 на сервере, компьютер администратора не нужен. Нужен Linux-сервер с Docker
+и плагином `docker compose`.
+
+**Первый запуск:**
+
+```bash
+git clone git@github.com:Yralskui/ai-marketer.git /opt/ai-marketer
+cd /opt/ai-marketer
+cp .env.example .env
+nano .env        # боевой BOT_TOKEN, ALLOWED_USER_IDS, ключи LLM, PUBLISH_DRY_RUN=false
+docker compose run --rm bot python -m app.main --check
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Репозиторий приватный. Для клонирования на сервере удобнее всего **deploy key**:
+`ssh-keygen -t ed25519` на сервере → GitHub → Settings → Deploy keys → Add (только чтение).
+
+**Обновление:**
+
+```bash
+cd /opt/ai-marketer
+git pull
+docker compose up -d --build
+```
+
+**Как устроено:**
+- БД SQLite и картинки лежат в volume `ai-marketer-data` (`/app/data` в контейнере). Пересборка
+  и перезапуск их не трогают: `docker compose restart bot` — посты, компании и расписание на
+  месте (критерий 10 ТЗ).
+- `restart: unless-stopped` — контейнер поднимается сам после сбоя и перезагрузки сервера.
+- `.env` в образ не попадает (`.dockerignore`), он подключается через `env_file`.
+- Логи ограничены: 3 файла по 10 МБ.
+- Резервная копия БД:
+  `docker compose cp bot:/app/data/app.db ./backup-$(date +%F).db`.
+- Если после обновления в логе «Схема БД устарела», значит изменились модели, а миграций
+  пока нет. Сохраните копию и удалите базу:
+  `docker compose down && docker volume rm ai-marketer-data && docker compose up -d`.
+
+Один `BOT_TOKEN` нельзя одновременно запускать на сервере и локально: Telegram отдаёт
+обновления только одному процессу. Для разработки нужен свой тестовый бот.
+
+---
+
 ## Работа в Git вдвоём
 
 - `main` всегда должна запускаться. Каждый работает в своей ветке:
