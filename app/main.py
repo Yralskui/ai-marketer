@@ -12,6 +12,7 @@ import logging
 import sys
 
 from app.config import Settings, get_settings
+from app.db.base import SchemaOutdatedError
 from app.logging_setup import setup_logging
 
 log = logging.getLogger("app")
@@ -68,7 +69,9 @@ async def run_check(settings: Settings) -> int:
 
 
 async def run_bot(settings: Settings) -> None:
-    from app.bot.setup import BOT_COMMANDS, create_bot, create_dispatcher
+    from aiogram.types import BotCommandScopeChat
+
+    from app.bot.setup import ADMIN_COMMANDS, BOT_COMMANDS, create_bot, create_dispatcher
     from app.container import build_container
     from app.scheduler.setup import create_scheduler
 
@@ -90,6 +93,13 @@ async def run_bot(settings: Settings) -> None:
             settings.publish_dry_run,
         )
         await bot.set_my_commands(BOT_COMMANDS)
+        for admin_id in settings.allowed_ids:
+            try:
+                await bot.set_my_commands(
+                    ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+            except Exception:  # администратор ещё не писал боту — чат недоступен
+                log.info("Не удалось задать меню команд для %s", admin_id)
         scheduler.start()
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
@@ -106,13 +116,16 @@ def main(argv: list[str] | None = None) -> None:
 
     settings = get_settings()
     setup_logging(settings.log_level)
-    if args.check:
-        sys.exit(asyncio.run(run_check(settings)))
-    if not settings.bot_token:
-        log.error("BOT_TOKEN не задан. Скопируйте .env.example в .env и заполните его.")
-        sys.exit(1)
     try:
+        if args.check:
+            sys.exit(asyncio.run(run_check(settings)))
+        if not settings.bot_token:
+            log.error("BOT_TOKEN не задан. Скопируйте .env.example в .env и заполните его.")
+            sys.exit(1)
         asyncio.run(run_bot(settings))
+    except SchemaOutdatedError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
     except KeyboardInterrupt:
         log.info("Остановлено")
 

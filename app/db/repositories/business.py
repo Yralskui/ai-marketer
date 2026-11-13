@@ -21,8 +21,14 @@ class BusinessRepo:
         )
         return result.scalar_one_or_none()
 
-    async def create(self, owner_id: int, name: str = "Мой бизнес") -> Business:
-        business = Business(owner_id=owner_id, name=name, profile={})
+    async def get_by_invite(self, code: str) -> Business | None:
+        result = await self.session.execute(select(Business).where(Business.invite_code == code))
+        return result.scalar_one_or_none()
+
+    async def create(
+        self, owner_id: int, name: str = "Мой бизнес", invite_code: str | None = None
+    ) -> Business:
+        business = Business(owner_id=owner_id, name=name, profile={}, invite_code=invite_code)
         self.session.add(business)
         await self.session.flush()
         return business

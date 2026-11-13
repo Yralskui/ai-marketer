@@ -17,6 +17,12 @@ class UserRepo:
         result = await self.session.execute(select(User).where(User.telegram_id == telegram_id))
         return result.scalar_one_or_none()
 
+    async def list_by_business(self, business_id: int) -> list[User]:
+        result = await self.session.execute(
+            select(User).where(User.business_id == business_id).order_by(User.id)
+        )
+        return list(result.scalars())
+
     async def get_or_create(
         self, telegram_id: int, name: str = "", role: UserRole = UserRole.OWNER
     ) -> User:

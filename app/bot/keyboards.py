@@ -46,3 +46,28 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Отмена", callback_data=CancelCb())
     return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- компании
+
+
+class CompanyCb(CallbackData, prefix="company"):
+    """Кнопки списка компаний. action: use."""
+
+    action: str
+    business_id: int
+
+
+def companies_keyboard(
+    items: list[tuple[int, str]], current_id: int | None
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for business_id, name in items:
+        if business_id == current_id:
+            continue
+        kb.button(
+            text=f"➡️ #{business_id} {name[:40]}",
+            callback_data=CompanyCb(action="use", business_id=business_id),
+        )
+    kb.adjust(1)
+    return kb.as_markup()

@@ -1,4 +1,4 @@
-"""Middleware: доступ по белому списку и сессия БД на каждое обновление."""
+"""Middleware: сессия БД, доступ и текущая компания на каждое обновление."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from aiogram.types import TelegramObject, Update
 from aiogram.types import User as TgUser
 
 from app.bot import texts
-from app.services.accounts import ensure_user_and_business
+from app.services.accounts import resolve_account
 
 if TYPE_CHECKING:
     from app.container import AppContainer
@@ -21,32 +21,22 @@ log = logging.getLogger(__name__)
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 
 
-class AccessMiddleware(BaseMiddleware):
-    """Пропускает только пользователей из ALLOWED_USER_IDS. Остальным сообщает их ID."""
-
-    def __init__(self, allowed_ids: set[int]) -> None:
-        self.allowed_ids = allowed_ids
-
-    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
-        user: TgUser | None = data.get("event_from_user")
-        if user is None:
-            return None  # посты в канале, служебные обновления — игнорируем
-        if user.id in self.allowed_ids:
-            return await handler(event, data)
-
-        log.warning("Доступ запрещён: %s (@%s)", user.id, user.username)
-        if isinstance(event, Update):
-            if event.message and event.message.chat.type == ChatType.PRIVATE:
-                await event.message.answer(texts.ACCESS_DENIED.format(user_id=user.id))
-            elif event.callback_query:
-                await event.callback_query.answer("Нет доступа", show_alert=True)
-        return None
+def start_payload(event: TelegramObject) -> str | None:
+    """Параметр из «/start <код>» (deep link с приглашением)."""
+    if isinstance(event, Update) and event.message and event.message.text:
+        parts = event.message.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].split("@")[0] == "/start":
+            return parts[1].strip()
+    return None
 
 
 class DbSessionMiddleware(BaseMiddleware):
-    """Открывает сессию, находит/создаёт пользователя и его бизнес.
+    """Открывает сессию, проверяет доступ и находит пользователя и его компанию.
 
-    В хендлерах доступны: session, db_user, business, container.
+    Доступ есть у администраторов (ALLOWED_USER_IDS) и у клиентов, подключённых по
+    приглашению. Остальным бот сообщает их ID и дальше обновление не пускает.
+
+    В хендлерах доступны: session, db_user, business, account, container.
     Коммит — после успешного хендлера, при исключении — откат.
     """
 
@@ -55,14 +45,26 @@ class DbSessionMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         tg_user: TgUser | None = data.get("event_from_user")
+        if tg_user is None:
+            return None  # посты в канале, служебные обновления — игнорируем
+
         async with self.container.db.sessionmaker() as session:
+            account = await resolve_account(
+                session,
+                self.container.settings,
+                tg_user.id,
+                tg_user.full_name,
+                start_payload=start_payload(event),
+            )
+            if account is None:
+                await session.rollback()
+                await _deny(event, tg_user)
+                return None
+
             data["session"] = session
-            if tg_user is not None:
-                user, business = await ensure_user_and_business(
-                    session, self.container.settings, tg_user.id, tg_user.full_name
-                )
-                data["db_user"] = user
-                data["business"] = business
+            data["account"] = account
+            data["db_user"] = account.user
+            data["business"] = account.business
             try:
                 result = await handler(event, data)
             except Exception:
@@ -70,3 +72,13 @@ class DbSessionMiddleware(BaseMiddleware):
                 raise
             await session.commit()
             return result
+
+
+async def _deny(event: TelegramObject, user: TgUser) -> None:
+    log.warning("Доступ запрещён: %s (@%s)", user.id, user.username)
+    if not isinstance(event, Update):
+        return
+    if event.message and event.message.chat.type == ChatType.PRIVATE:
+        await event.message.answer(texts.ACCESS_DENIED.format(user_id=user.id))
+    elif event.callback_query:
+        await event.callback_query.answer("Нет доступа", show_alert=True)

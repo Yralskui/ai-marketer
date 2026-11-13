@@ -10,15 +10,27 @@ from aiogram.types import CallbackQuery, Message
 from app.bot import texts
 from app.bot.keyboards import CancelCb
 from app.db.models import Business, User
+from app.services.accounts import Account
 from app.services.business_profile import get_profile
 
 router = Router(name="start")
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, db_user: User, business: Business) -> None:
+async def cmd_start(
+    message: Message, state: FSMContext, db_user: User, business: Business, account: Account
+) -> None:
     await state.clear()
-    await message.answer(texts.start(db_user.name, get_profile(business).is_filled()))
+    await message.answer(
+        texts.start_for(
+            db_user.name,
+            get_profile(business).is_filled(),
+            business.name,
+            business.id,
+            joined=account.joined,
+            admin=account.is_admin,
+        )
+    )
 
 
 @router.message(Command("help"))
