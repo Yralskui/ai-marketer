@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # Строка вида "123,456": pydantic-settings иначе ждёт JSON-список
     allowed_user_ids: str = ""
     telegram_channel_id: str = ""
+    # socks5://user:pass@host:port или http://… — если api.telegram.org недоступен (VPS в РФ)
+    telegram_proxy: str = ""
 
     # --- LLM ---
     llm_provider: str = "mock"

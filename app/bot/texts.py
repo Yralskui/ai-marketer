@@ -36,6 +36,7 @@ HELP = (
     "/channel — Telegram-канал для публикаций\n"
     "/comments — комментарии под постами и ответы на них\n"
     "/report — отчёт: показатели, выводы и что сделать\n"
+    "/log — журнал действий по компании\n"
     "/status — диагностика\n"
     "/cancel — отменить текущее действие"
 )
@@ -129,12 +130,25 @@ def profile_card(profile: BusinessProfile) -> str:
     return "\n".join(lines)
 
 
-def draft_card(post: Post, revision_no: int | None = None) -> str:
+def draft_card(
+    post: Post,
+    revision_no: int | None = None,
+    *,
+    channel: str | None = None,
+    tz: tzinfo | None = None,
+) -> str:
+    """Карточка на согласование: материал, площадка и время публикации (п. 3.5 ТЗ)."""
     header = DRAFT_HEADER.format(
         id=post.id,
         platform=PLATFORM_TITLES.get(post.platform, str(post.platform)),
         revision=f" · версия {revision_no}" if revision_no and revision_no > 1 else "",
     )
+    where = f"<code>{escape(channel)}</code>" if channel else "канал не подключён — /channel"
+    if post.scheduled_at and tz is not None:
+        when = f"запланировано на <b>{format_local(post.scheduled_at, tz)}</b>"
+    else:
+        when = "сразу после «Опубликовать» или в выбранное вами время"
+    header += f"📣 Куда: {where}\n🕒 Когда: {when}\n\n"
     body = escape(post.text)
     limit = 4096 - len(header) - len(DRAFT_TRUNCATED) - 16
     if len(body) > limit:
@@ -391,3 +405,47 @@ def comments_overview(
 
 REPORT_BUILDING = "📈 Собираю отчёт за {days} дн.…"
 REPORT_USAGE = "Отчёт за период: /report 7 (дней, от 1 до 90)."
+
+
+# --- поток B ---------------------------------------------------- журнал и клиенты
+
+LOG_HEADER = "📜 <b>Журнал действий</b> · {company}\n"
+LOG_EMPTY = "Событий пока нет."
+CLIENTS_HEADER = "👥 <b>Клиенты компании</b> {company}\n"
+CLIENTS_EMPTY = "Клиентов пока нет. Ссылка-приглашение — /invite"
+CLIENT_REVOKED = "🚫 Доступ {name} отключён. Старая ссылка-приглашение больше не работает."
+CLIENT_RESTORED = "✅ Доступ {name} возвращён."
+
+EVENT_ICONS = {
+    "post_created": "📝",
+    "post_revised": "✏️",
+    "post_submitted": "📨",
+    "post_approved": "👍",
+    "post_rejected": "❌",
+    "post_scheduled": "🕒",
+    "post_published": "✅",
+    "post_failed": "⚠️",
+    "profile_updated": "🏢",
+    "source_added": "📚",
+    "agent_error": "🤖",
+    "budget_exceeded": "💰",
+    "comment_received": "💬",
+    "comment_replied": "↩️",
+    "company_created": "🏢",
+    "client_joined": "🤝",
+    "client_revoked": "🚫",
+    "client_restored": "✅",
+    "channel_changed": "📣",
+}
+
+
+def log_line(created_local: str, type_: str, message: str, post_id: int | None) -> str:
+    icon = EVENT_ICONS.get(type_, "•")
+    post = f" #{post_id}" if post_id else ""
+    tail = f" — {escape(message[:80])}" if message else ""
+    return f"{icon} <code>{created_local}</code> {escape(type_)}{post}{tail}"
+
+
+def client_line(name: str, telegram_id: int, active: bool) -> str:
+    state = "активен" if active else "отключён"
+    return f"{'🟢' if active else '⚪️'} {escape(name or str(telegram_id))} — {state}"

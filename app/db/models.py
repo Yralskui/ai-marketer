@@ -99,6 +99,8 @@ class EventType(StrEnum):
     COMMENT_REPLIED = "comment_replied"
     COMPANY_CREATED = "company_created"
     CLIENT_JOINED = "client_joined"
+    CLIENT_REVOKED = "client_revoked"
+    CLIENT_RESTORED = "client_restored"
     CHANNEL_CHANGED = "channel_changed"
 
 

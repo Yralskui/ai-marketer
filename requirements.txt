@@ -1,5 +1,7 @@
 # Основные зависимости приложения (Python 3.11+)
 aiogram>=3.13,<4
+# SOCKS-прокси для Telegram (TELEGRAM_PROXY=socks5://…)
+aiohttp-socks>=0.8
 SQLAlchemy[asyncio]>=2.0.30,<2.1
 aiosqlite>=0.20
 pydantic>=2.7,<3

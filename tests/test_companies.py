@@ -205,3 +205,52 @@ async def test_old_sqlite_file_gets_new_columns(tmp_path):
         assert user.is_active is True  # значение по умолчанию проставлено
         assert user.business_id is None
     await db.dispose()
+
+
+async def test_revoked_client_loses_access_and_old_link(session, settings, two_companies):
+    admin, _, company_b, client = two_companies
+    old_code = company_b.invite_code
+
+    await accounts.set_client_access(session, admin, company_b, client.id, active=False)
+    assert await resolve_account(session, settings, CLIENT_B, "Клиент Б") is None
+    assert company_b.invite_code != old_code
+    assert (
+        await resolve_account(session, settings, CLIENT_B, "Клиент Б", start_payload=old_code)
+        is None
+    )
+
+    await accounts.set_client_access(session, admin, company_b, client.id, active=True)
+    assert (await resolve_account(session, settings, CLIENT_B, "Клиент Б")).business.id == (
+        company_b.id
+    )
+
+
+async def test_only_admin_manages_access(session, two_companies):
+    _, _, company_b, client = two_companies
+    with pytest.raises(CompanyError):
+        await accounts.set_client_access(session, client, company_b, client.id, active=False)
+
+
+def test_draft_card_shows_channel_and_time():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.bot import texts
+    from app.db.models import Platform, Post, PostStatus
+
+    post = Post(id=5, text="Текст", platform=Platform.TELEGRAM, status=PostStatus.PENDING_APPROVAL)
+    card = texts.draft_card(post, channel="@my_channel", tz=ZoneInfo("Asia/Yekaterinburg"))
+    assert "Куда: <code>@my_channel</code>" in card and "сразу после" in card
+
+    post.scheduled_at = datetime(2026, 11, 20, 5, 0)  # 10:00 по Екатеринбургу
+    card = texts.draft_card(post, channel=None, tz=ZoneInfo("Asia/Yekaterinburg"))
+    assert "канал не подключён" in card and "20.11" in card and "10:00" in card
+
+
+def test_bot_uses_proxy_when_configured(settings):
+    from app.bot.setup import create_bot
+
+    settings.bot_token = "123456:" + "A" * 35
+    settings.telegram_proxy = "http://user:pass@127.0.0.1:3128"
+    bot = create_bot(settings)
+    assert bot.session.proxy == "http://user:pass@127.0.0.1:3128"

@@ -386,6 +386,20 @@ async def test_end_to_end_bot_flow(settings):
     assert "Роза" in fake.sent_texts(CLIENT_ID)[-1]
     assert "Зерно" not in fake.sent_texts(CLIENT_ID)[-1]
 
+    # Журнал действий и отзыв доступа клиента
+    await feed(bot, msg(OWNER_ID, f"/use {company_b}"))
+    await feed(bot, msg(OWNER_ID, "/log"))
+    assert "Журнал действий" in fake.sent_texts(OWNER_ID)[-1]
+    assert "client_joined" in fake.sent_texts(OWNER_ID)[-1]
+    fake.clear()
+    await feed(bot, msg(OWNER_ID, "/clients"))
+    clients_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
+    revoke = clients_msg.reply_markup.inline_keyboard[0][0].callback_data
+    await feed(bot, press_data(OWNER_ID, revoke))
+    assert "отключён" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, msg(CLIENT_ID, "/posts"))
+    assert "нет доступа" in fake.sent_texts(CLIENT_ID)[-1]
+
     # Без приглашения посторонний по-прежнему не проходит
     await feed(bot, msg(STRANGER_ID, "/start wrong-invite-code"))
     assert "нет доступа" in fake.sent_texts(STRANGER_ID)[-1]

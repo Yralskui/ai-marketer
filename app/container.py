@@ -13,7 +13,8 @@ from app.agent.core import Agent
 from app.agent.registry import ToolRegistry, default_registry
 from app.config import Settings
 from app.db.base import Database
-from app.db.models import Platform
+from app.db.models import Platform, Post
+from app.db.repositories import ChannelRepo
 from app.images.base import ImageProvider
 from app.images.factory import create_image_provider
 from app.llm.base import LLMProvider
@@ -51,13 +52,23 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         Platform.VK: VKPublisher(),
         Platform.MAX: MaxPublisher(),
     }
+    db = Database(settings.effective_database_url)
     notifier: Notifier | None = None
     if bot is not None:
         from app.bot.notifier import BotNotifier
         from app.publishers.telegram import TelegramPublisher
 
+        async def channel_of(post: Post) -> str | None:
+            async with db.sessionmaker() as session:
+                repo = ChannelRepo(session)
+                channel = await repo.get(post.channel_id) if post.channel_id else None
+                channel = channel or await repo.get_active(
+                    post.business_id, Platform(post.platform)
+                )
+                return channel.title or channel.external_id if channel else None
+
         publishers[Platform.TELEGRAM] = TelegramPublisher(bot)
-        notifier = BotNotifier(bot, settings)
+        notifier = BotNotifier(bot, settings, channel_lookup=channel_of)
 
     async def alert_admins(text: str) -> None:
         if notifier is not None:
@@ -69,7 +80,7 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
 
     return AppContainer(
         settings=settings,
-        db=Database(settings.effective_database_url),
+        db=db,
         llm=MeteredLLM(create_llm(settings), recorder, settings.llm_model),
         images=MeteredImages(create_image_provider(settings), recorder),
         publishing=PublishingService(publishers, dry_run=settings.publish_dry_run),
