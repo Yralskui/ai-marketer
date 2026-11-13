@@ -22,6 +22,7 @@ from app.bot.handlers import (
     comments,
     companies,
     costs,
+    media,
     onboarding,
     reports,
     start,
@@ -213,3 +214,11 @@ async def menu_log(
 ) -> None:
     await state.clear()
     await audit.cmd_log(message, _command("log"), session, business, container)
+
+
+@router.message(F.text == kb.MENU_PHOTOS)
+async def menu_photos(
+    message: Message, state: FSMContext, session: AsyncSession, business: Business, bot: Bot
+) -> None:
+    await state.clear()
+    await media.cmd_photos(message, session, business, bot)

@@ -107,8 +107,13 @@ async def create_draft(
     platform: Platform = Platform.TELEGRAM,
     with_image: bool = False,
     plan_item_id: int | None = None,
+    image_path: str | None = None,
 ) -> Post:
-    """Пишет текст (и картинку) через LLM и сохраняет пост в статусе draft."""
+    """Пишет текст (и картинку) через LLM и сохраняет пост в статусе draft.
+
+    `image_path` — готовое фото клиента из фотобанка: тогда картинка не генерируется.
+    """
+    with_image = with_image or image_path is not None
     limit = target_length(platform, with_image)
     system = render_prompt(
         "write_post",
@@ -124,8 +129,7 @@ async def create_draft(
     )
     text = clean_post_text(await llm.complete(system, user, task="write_post"), platform)
 
-    image_path = None
-    if with_image:
+    if image_path is None and with_image:
         # TODO(поток A): отдельный промпт для картинки (визуальное описание сцены)
         image_path = str(await images.generate(f"{topic} — {business.name}"))
 

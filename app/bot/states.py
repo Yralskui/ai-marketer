@@ -19,3 +19,8 @@ class MenuStates(StatesGroup):
 
 class CommentStates(StatesGroup):
     waiting_reply = State()  # свой текст ответа на комментарий; в data: comment_id
+
+
+class MediaStates(StatesGroup):
+    waiting_topic = State()  # тема поста к фото из фотобанка; в data: media_id
+    waiting_replacement = State()  # новое фото для черновика; в data: post_id

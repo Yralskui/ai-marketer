@@ -100,6 +100,7 @@ class EventType(StrEnum):
     COMPANY_CREATED = "company_created"
     CLIENT_JOINED = "client_joined"
     CLIENT_REVOKED = "client_revoked"
+    PHOTO_ADDED = "photo_added"
     CLIENT_RESTORED = "client_restored"
     CHANNEL_CHANGED = "channel_changed"
 
@@ -360,3 +361,22 @@ class PostMetric(TimestampMixin, Base):
     reactions_total: Mapped[int] = mapped_column(Integer, default=0)
     # {"👍": 5, "🔥": 2}
     reactions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class MediaFile(TimestampMixin, Base):
+    """Фото компании из фотобанка: прислал клиент или администратор.
+
+    Используется как картинка поста вместо сгенерированной. `description` — описание
+    фото для нейросети (заполняет модель со зрением; пока может быть пустым).
+    """
+
+    __tablename__ = "media_files"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), index=True)
+    path: Mapped[str] = mapped_column(String(1024))
+    caption: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # file_unique_id Telegram — чтобы не сохранять одно и то же фото дважды
+    telegram_unique_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)

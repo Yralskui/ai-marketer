@@ -20,9 +20,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
     Chat,
+    File,
     Message,
     MessageOriginChannel,
     MessageReactionCountUpdated,
+    PhotoSize,
     ReactionCount,
     ReactionTypeEmoji,
     Update,
@@ -41,6 +43,7 @@ OWNER_ID = 111
 STRANGER_ID = 666
 CLIENT_ID = 222
 COMMENTER_ID = 333
+PHOTO_BYTES = bytes([0xFF, 0xD8, 0xFF, 0xE0]) + b"fake-jpeg"
 
 
 class FakeSession(BaseSession):
@@ -66,6 +69,15 @@ class FakeSession(BaseSession):
                 chat=chat,
                 text=getattr(method, "text", None),
             )
+        if name == "SendMediaGroup":
+            return [
+                Message(message_id=next(self._ids), date=datetime.now(),
+                        chat=Chat(id=int(method.chat_id), type="private"))
+                for _ in method.media
+            ]  # fmt: skip
+        if name == "GetFile":
+            return File(file_id=method.file_id, file_unique_id="u-" + method.file_id,
+                        file_path=f"photos/{method.file_id}.jpg")  # fmt: skip
         if name == "GetMe":
             return User(id=999, is_bot=True, first_name="Bot", username="test_bot")
         if name in ("GetChat", "GetChatMember"):
@@ -75,8 +87,8 @@ class FakeSession(BaseSession):
     async def close(self) -> None:
         pass
 
-    async def stream_content(self, *args: Any, **kwargs: Any):  # pragma: no cover
-        yield b""
+    async def stream_content(self, *args: Any, **kwargs: Any):
+        yield PHOTO_BYTES  # «скачанное» фото
 
     # --- помощники для проверок
 
@@ -164,6 +176,22 @@ def group_comment(uid: int, text: str, channel_message_id: int) -> Update:
     )
 
 
+def photo_msg(uid: int, file_id: str, caption: str | None = None) -> Update:
+    return Update(
+        update_id=next(_update_ids),
+        message=Message(
+            message_id=next(_update_ids),
+            date=datetime.now(),
+            chat=Chat(id=uid, type="private"),
+            from_user=_user(uid),
+            photo=[
+                PhotoSize(file_id=file_id, file_unique_id="u-" + file_id, width=800, height=600)
+            ],
+            caption=caption,
+        ),
+    )
+
+
 def last_draft_id(session: FakeSession) -> int:
     for text in reversed(session.sent_texts(OWNER_ID)):
         m = re.search(r"Черновик #(\d+)", text or "")
@@ -172,7 +200,10 @@ def last_draft_id(session: FakeSession) -> int:
     raise AssertionError("черновик не отправлен")
 
 
-async def test_end_to_end_bot_flow(settings):
+async def test_end_to_end_bot_flow(settings, monkeypatch, tmp_path):
+    import app.services.media
+
+    monkeypatch.setattr(app.services.media, "UPLOADS_DIR", tmp_path / "uploads")
     fake = FakeSession()
     settings.bot_token = "123456:" + "A" * 35
     bot = Bot(settings.bot_token, session=fake)
@@ -221,7 +252,13 @@ async def test_end_to_end_bot_flow(settings):
     post1 = last_draft_id(fake)
     draft_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
     buttons = [b.text for row in draft_msg.reply_markup.inline_keyboard for b in row]
-    assert buttons == ["✅ Опубликовать сейчас", "🕒 Запланировать", "✏️ Изменить", "❌ Отклонить"]
+    assert buttons == [
+        "✅ Опубликовать сейчас",
+        "🕒 Запланировать",
+        "✏️ Изменить",
+        "🖼 Своё фото",
+        "❌ Отклонить",
+    ]
     assert await status_of(post1) == PostStatus.PENDING_APPROVAL
 
     # ✅ Опубликовать -> сообщение в канал + ссылка
@@ -312,9 +349,32 @@ async def test_end_to_end_bot_flow(settings):
     assert last_draft_id(fake) == post3
     assert await status_of(post3) == PostStatus.PENDING_APPROVAL
 
+    # 🖼 Своё фото вместо картинки: черновик снова уходит на согласование
+    fake.clear()
+    await feed(bot, press(OWNER_ID, "photo", post3))
+    assert "Пришлите фото для поста" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, photo_msg(OWNER_ID, "own-1"))
+    assert f"Фото в посте #{post3} заменено" in " ".join(fake.sent_texts(OWNER_ID))
+    assert last_draft_id(fake) == post3
+    async with container.db.sessionmaker() as s:
+        assert (await PostRepo(s).get(post3)).image_path.endswith("u-own-1.jpg")
+    assert await status_of(post3) == PostStatus.PENDING_APPROVAL
+
     # ❌ Отклонить
     await feed(bot, press(OWNER_ID, "reject", post3))
     assert await status_of(post3) == PostStatus.REJECTED
+
+    # Фото с подписью -> сразу пост с этим фото; без подписи -> кнопки
+    fake.clear()
+    await feed(bot, photo_msg(OWNER_ID, "own-2", "Новый зал на втором этаже"))
+    post4 = last_draft_id(fake)
+    async with container.db.sessionmaker() as s:
+        assert (await PostRepo(s).get(post4)).image_path.endswith("u-own-2.jpg")
+    await feed(bot, photo_msg(OWNER_ID, "own-3"))
+    assert "Сделать с ним пост" in fake.sent_texts(OWNER_ID)[-1]
+    await feed(bot, msg(OWNER_ID, kb.MENU_PHOTOS))
+    assert "Фотобанк" in fake.sent_texts(OWNER_ID)[-1]
+    assert any(type(r).__name__ == "SendMediaGroup" for r in fake.requests)
 
     # /posts, /status, неизвестная команда
     await feed(bot, msg(OWNER_ID, "/posts"))

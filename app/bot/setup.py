@@ -21,6 +21,7 @@ BOT_COMMANDS = [
     BotCommand(command="channel", description="Канал для публикаций"),
     BotCommand(command="comments", description="Комментарии и ответы"),
     BotCommand(command="report", description="Отчёт за неделю"),
+    BotCommand(command="photos", description="Фотобанк для постов"),
     BotCommand(command="status", description="Диагностика"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),
@@ -60,6 +61,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         comments,
         companies,
         costs,
+        media,
         menu,
         onboarding,
         reports,
@@ -74,6 +76,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         comments.router,  # ПЕРВЫМ: забирает все сообщения из групп обсуждения
         start.router,
         menu.router,  # кнопки меню — раньше онбординга: прерывают любой ввод
+        media.router,  # фото — в фотобанк из любого состояния
         onboarding.router,
         approval.router,
         admin.router,
