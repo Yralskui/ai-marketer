@@ -33,6 +33,15 @@ class EventLogRepo:
         await self.session.flush()
         return event
 
+    async def list_recent(self, business_id: int, limit: int = 15) -> list[EventLog]:
+        result = await self.session.execute(
+            select(EventLog)
+            .where(EventLog.business_id == business_id)
+            .order_by(EventLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
     async def list_since(self, business_id: int, since_utc: datetime) -> list[EventLog]:
         result = await self.session.execute(
             select(EventLog)

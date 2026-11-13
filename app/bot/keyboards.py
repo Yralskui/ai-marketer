@@ -88,8 +88,17 @@ MENU_COMPANIES = "🗂 Компании"
 MENU_NEW_COMPANY = "➕ Новая компания"
 MENU_INVITE = "🔗 Приглашение"
 MENU_COSTS = "💰 Расходы"
+MENU_CLIENTS = "👥 Клиенты"
+MENU_LOG = "📜 Журнал"
 
-ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE, MENU_COSTS)
+ADMIN_MENU_BUTTONS = (
+    MENU_COMPANIES,
+    MENU_NEW_COMPANY,
+    MENU_INVITE,
+    MENU_CLIENTS,
+    MENU_COSTS,
+    MENU_LOG,
+)
 
 
 def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
@@ -103,7 +112,7 @@ def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)
-        sizes += [2, 2]
+        sizes += [3, 3]
     kb.adjust(*sizes)
     return kb.as_markup(
         resize_keyboard=True,
@@ -130,4 +139,31 @@ def comment_keyboard(comment_id: int) -> InlineKeyboardMarkup:
     kb.button(text="✏️ Свой ответ", callback_data=CommentCb(action="edit", comment_id=comment_id))
     kb.button(text="🙈 Пропустить", callback_data=CommentCb(action="skip", comment_id=comment_id))
     kb.adjust(1, 2)
+    return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- клиенты компании
+
+
+class ClientCb(CallbackData, prefix="client"):
+    """action: revoke | restore."""
+
+    action: str
+    user_id: int
+
+
+def clients_keyboard(clients: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for user_id, name, active in clients:
+        if active:
+            kb.button(
+                text=f"🚫 Отключить {name[:30]}",
+                callback_data=ClientCb(action="revoke", user_id=user_id),
+            )
+        else:
+            kb.button(
+                text=f"✅ Вернуть {name[:30]}",
+                callback_data=ClientCb(action="restore", user_id=user_id),
+            )
+    kb.adjust(1)
     return kb.as_markup()

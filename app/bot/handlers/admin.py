@@ -30,7 +30,11 @@ async def cmd_posts(
 
 @router.message(Command("post"))
 async def cmd_post(
-    message: Message, command: CommandObject, session: AsyncSession, business: Business
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    business: Business,
+    container: AppContainer,
 ) -> None:
     arg = (command.args or "").strip().lstrip("#")
     if not arg.isdigit():
@@ -43,7 +47,15 @@ async def cmd_post(
     keyboard = None
     if post.status not in (PostStatus.PUBLISHED, PostStatus.REJECTED):
         keyboard = draft_keyboard(post.id)
-    await message.answer(texts.draft_card(post), reply_markup=keyboard)
+    channel = await ChannelRepo(session).get_active(business.id, Platform(post.platform))
+    await message.answer(
+        texts.draft_card(
+            post,
+            channel=channel.external_id if channel else None,
+            tz=container.settings.tz,
+        ),
+        reply_markup=keyboard,
+    )
 
 
 @router.message(Command("status"))

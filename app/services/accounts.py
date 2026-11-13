@@ -221,6 +221,36 @@ async def regenerate_invite(session: AsyncSession, admin: User, business: Busine
     return business
 
 
+async def set_client_access(
+    session: AsyncSession, admin: User, business: Business, client_id: int, active: bool
+) -> User:
+    """Отключает или возвращает доступ клиента компании.
+
+    При отключении меняется и код приглашения, чтобы клиент не вернулся по старой ссылке.
+    """
+    _require_admin(admin)
+    client = await UserRepo(session).get(client_id)
+    if client is None or client.business_id != business.id or is_admin(client):
+        raise CompanyError("Такого клиента у текущей компании нет.")
+    client.is_active = active
+    if not active:
+        business.invite_code = new_invite_code()
+    await EventLogRepo(session).log(
+        EventType.CLIENT_RESTORED if active else EventType.CLIENT_REVOKED,
+        f"{'Возвращён' if active else 'Отключён'} доступ: {client.name or client.telegram_id}",
+        business_id=business.id,
+        payload={"admin_id": admin.id, "client_id": client.id},
+    )
+    await session.flush()
+    return client
+
+
+async def list_clients(session: AsyncSession, admin: User, business: Business) -> list[User]:
+    _require_admin(admin)
+    users = await UserRepo(session).list_by_business(business.id)
+    return [u for u in users if u.role == UserRole.OWNER]
+
+
 def _require_admin(user: User) -> None:
     if not is_admin(user):
         raise CompanyError("Эта команда доступна только администратору.")

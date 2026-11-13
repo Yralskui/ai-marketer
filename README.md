@@ -10,6 +10,8 @@ LLM-клиент, pydantic-settings, ruff, pytest.
 
 Документация: [архитектура](docs/ARCHITECTURE.md) · [бэклог](docs/TASKS.md) ·
 [подключение компании](docs/ONBOARDING_COMPANY.md) ·
+[выбор нейросети](docs/AI_OPTIONS.md) · [функции и ограничения](docs/FEATURES.md) ·
+[доработки](docs/ROADMAP.md) · [затраты](docs/COSTS.md) ·
 [решения](docs/DECISIONS.md) · [правила для Claude Code](CLAUDE.md)
 
 ---
