@@ -1,13 +1,26 @@
-"""Публикация в Telegram-канал (бот должен быть админом канала)."""
+"""Публикация в Telegram-канал (бот должен быть админом канала).
+
+Временные ошибки повторяются автоматически, но только те, после которых Telegram
+гарантированно НЕ принял сообщение: 429 (подождать retry_after) и 5xx. Сетевой сбой
+не повторяем: сообщение могло уйти, а повтор дал бы дубль в канале.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
 
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import FSInputFile, Message
 
 from app.db.models import Channel, Platform, Post
@@ -15,13 +28,46 @@ from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishRe
 from app.services.posts import PLATFORM_HARD_LIMITS, TELEGRAM_CAPTION_LIMIT
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
+
+MAX_RETRIES = 3
+# Дольше ждать не будем: пусть пост уйдёт в failed, а владелец получит уведомление
+MAX_RETRY_WAIT = 60.0
 
 
 class TelegramPublisher(Publisher):
     platform = Platform.TELEGRAM
 
-    def __init__(self, bot: Bot) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        *,
+        max_retries: int = MAX_RETRIES,
+        base_delay: float = 2.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.bot = bot
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self._sleep = sleep
+
+    async def _call(self, make: Callable[[], Awaitable[T]]) -> T:
+        """Один вызов Bot API с повтором 429 и 5xx."""
+        attempt = 0
+        while True:
+            try:
+                return await make()
+            except TelegramRetryAfter as exc:
+                if attempt >= self.max_retries or exc.retry_after > MAX_RETRY_WAIT:
+                    raise
+                delay = float(exc.retry_after)
+            except TelegramServerError:
+                if attempt >= self.max_retries:
+                    raise
+                delay = min(MAX_RETRY_WAIT, self.base_delay * (2**attempt))
+            attempt += 1
+            log.warning("Telegram временно недоступен, повтор %d через %.0f с", attempt, delay)
+            await self._sleep(delay)
 
     async def publish(self, post: Post, channel: Channel) -> PublishResult:
         chat_id = channel.external_id
@@ -30,15 +76,27 @@ class TelegramPublisher(Publisher):
             if post.image_path and Path(post.image_path).exists():
                 photo = FSInputFile(post.image_path)
                 if len(text) <= TELEGRAM_CAPTION_LIMIT:
-                    msg = await self.bot.send_photo(chat_id, photo, caption=text, parse_mode=None)
+                    msg = await self._call(
+                        lambda: self.bot.send_photo(chat_id, photo, caption=text, parse_mode=None)
+                    )
                 else:
-                    # Подпись к фото ограничена 1024 символами — шлём фото и текст отдельно
-                    await self.bot.send_photo(chat_id, photo)
-                    msg = await self.bot.send_message(chat_id, text, parse_mode=None)
+                    # Подпись к фото ограничена 1024 символами — шлём фото и текст отдельно.
+                    # Каждый вызов повторяется сам по себе, фото не уйдёт дважды.
+                    await self._call(lambda: self.bot.send_photo(chat_id, photo))
+                    msg = await self._call(
+                        lambda: self.bot.send_message(chat_id, text, parse_mode=None)
+                    )
             else:
                 if post.image_path:
                     log.warning("Картинка поста #%s не найдена: %s", post.id, post.image_path)
-                msg = await self.bot.send_message(chat_id, text, parse_mode=None)
+                msg = await self._call(
+                    lambda: self.bot.send_message(chat_id, text, parse_mode=None)
+                )
+        except TelegramNetworkError as exc:
+            raise PublishError(
+                f"нет связи с Telegram ({exc}). Сообщение могло уйти — проверьте канал, "
+                "прежде чем публиковать повторно"
+            ) from exc
         except TelegramAPIError as exc:
             raise PublishError(f"Telegram: {exc}") from exc
         return PublishResult(external_id=str(msg.message_id), url=message_url(msg))

@@ -1,0 +1,27 @@
+name: ai-marketer
+
+# Запуск на сервере:  docker compose up -d --build
+# Логи:               docker compose logs -f bot
+# Проверка конфига:   docker compose run --rm bot python -m app.main --check
+services:
+  bot:
+    build: .
+    image: ai-marketer:latest
+    container_name: ai-marketer
+    # Секреты берутся из .env рядом с этим файлом (в образ он не попадает)
+    env_file: .env
+    environment:
+      # БД и картинки — в volume, чтобы переживали пересборку и перезапуск
+      DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
+    volumes:
+      - bot-data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
+    name: ai-marketer-data
