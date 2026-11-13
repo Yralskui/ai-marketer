@@ -24,3 +24,7 @@ class CommentStates(StatesGroup):
 class MediaStates(StatesGroup):
     waiting_topic = State()  # тема поста к фото из фотобанка; в data: media_id
     waiting_replacement = State()  # новое фото для черновика; в data: post_id
+
+
+class BrandStates(StatesGroup):
+    waiting_material = State()  # брендбук файлом или правила текстом

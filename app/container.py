@@ -14,7 +14,7 @@ from app.agent.registry import ToolRegistry, default_registry
 from app.config import Settings
 from app.db.base import Database
 from app.db.models import Platform, Post
-from app.db.repositories import ChannelRepo
+from app.db.repositories import BusinessRepo, ChannelRepo
 from app.images.base import ImageProvider
 from app.images.factory import create_image_provider
 from app.llm.base import LLMProvider
@@ -67,8 +67,15 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
                 )
                 return channel.title or channel.external_id if channel else None
 
+        async def brand_issues(post: Post) -> list[str]:
+            from app.services.brand import check_text, get_guide
+
+            async with db.sessionmaker() as session:
+                business = await BusinessRepo(session).get(post.business_id)
+                return check_text(post.text, get_guide(business)) if business else []
+
         publishers[Platform.TELEGRAM] = TelegramPublisher(bot)
-        notifier = BotNotifier(bot, settings, channel_lookup=channel_of)
+        notifier = BotNotifier(bot, settings, channel_lookup=channel_of, brand_check=brand_issues)
 
     async def alert_admins(text: str) -> None:
         if notifier is not None:
@@ -88,7 +95,8 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
             default_registry,
             max_steps=settings.agent_max_steps,
             history_limit=settings.agent_history_limit,
-            step_timeout=settings.llm_timeout * (settings.llm_max_retries + 1) + 5,
+            # Шаг агента ждёт все повторы LLM: бюджет + последняя попытка + запас
+            step_timeout=settings.llm_retry_budget_seconds + settings.llm_timeout + 10,
         ),
         registry=default_registry,
         notifier=notifier,

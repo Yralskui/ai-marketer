@@ -18,6 +18,7 @@ from app.bot import texts
 from app.bot.handlers import (
     admin,
     audit,
+    brand,
     chat,
     comments,
     companies,
@@ -240,3 +241,11 @@ async def on_new_post_button(callback: CallbackQuery, state: FSMContext) -> None
     if isinstance(callback.message, Message):
         await state.set_state(MenuStates.waiting_post_topic)
         await callback.message.answer(texts.ASK_POST_TOPIC, reply_markup=kb.cancel_keyboard())
+
+
+@router.message(F.text == kb.MENU_BRAND)
+async def menu_brand(
+    message: Message, state: FSMContext, db_user: User, business: Business
+) -> None:
+    await state.clear()
+    await brand.menu_brand(message, db_user, business)

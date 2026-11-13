@@ -131,7 +131,11 @@ async def create_draft(
 
     if image_path is None and with_image:
         # TODO(поток A): отдельный промпт для картинки (визуальное описание сцены)
-        image_path = str(await images.generate(f"{topic} — {business.name}"))
+        from app.services.brand import image_style
+
+        prompt = f"{topic} — {business.name}"
+        style = image_style(business)
+        image_path = str(await images.generate(f"{prompt}. {style}" if style else prompt))
 
     channel = await ChannelRepo(session).get_active(business.id, platform)
     post = Post(

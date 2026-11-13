@@ -35,7 +35,7 @@ from app.container import AppContainer
 from app.db.models import Business, EventType, Platform, Post, PostStatus, User
 from app.db.repositories import ChannelRepo, EventLogRepo
 from app.llm.base import LLMError
-from app.services import accounts, approval, posts
+from app.services import accounts, approval, brand, posts
 from app.services.posts import STATUS_TITLES, InvalidTransitionError
 from app.utils.time import (
     DateParseError,
@@ -60,6 +60,7 @@ ACTION_STATUSES: dict[str, set[PostStatus]] = {
     "schedule": {PostStatus.PENDING_APPROVAL, PostStatus.FAILED, PostStatus.SCHEDULED},
     "edit": EDITABLE,
     "reject": {PostStatus.DRAFT, PostStatus.PENDING_APPROVAL, PostStatus.FAILED},
+    "brandfix": EDITABLE,
 }
 
 
@@ -419,6 +420,31 @@ async def on_revision_text(
         await message.answer(texts.POST_NOT_FOUND)
         return
     await _revise(message, session, business, container, bot, post, message.text or "")
+
+
+@router.callback_query(PostCb.filter(F.action == "brandfix"))
+async def on_brand_fix(
+    callback: CallbackQuery,
+    callback_data: PostCb,
+    session: AsyncSession,
+    db_user: User,
+    business: Business,
+    container: AppContainer,
+    bot: Bot,
+) -> None:
+    """Переписать пост так, чтобы он прошёл проверку бренд-гида."""
+    post = await _load(callback, session, db_user, business, callback_data.post_id, EDITABLE)
+    if post is None or not isinstance(callback.message, Message):
+        return
+    post_business = await accounts.business_of(session, post, business)
+    issues = brand.check_text(post.text, brand.get_guide(post_business))
+    if not issues:
+        await callback.answer("Нарушений бренд-гида нет")
+        return
+    await callback.answer("Исправляю")
+    await _drop_keyboard(callback.message)
+    instruction = "Исправь текст по бренд-гиду, остальное не меняй: " + "; ".join(issues)
+    await _revise(callback.message, session, business, container, bot, post, instruction)
 
 
 # ---------------------------------------------------------------- отклонить
