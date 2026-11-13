@@ -86,3 +86,23 @@ async def test_clearing_guide(owner):
     brand.set_guide(business, SALAVATSTEKLO)
     brand.set_guide(business, None)
     assert not brand.get_guide(business).is_filled()
+
+
+def test_legal_names_and_hashtags_are_not_errors():
+    text = (
+        "АО «Салаватстекло», АО «Саратовстройстекло» и ООО «Салаватстекло Каспий» — одна команда. "
+        "#MultiComfort #САЛАВАТСТЕКЛО"
+    )
+    assert brand.check_text(text, SALAVATSTEKLO) == []
+
+
+def test_example_posts_pass_brand_check():
+    """Эталонные посты из content/salavatsteklo проходят проверку бренд-гида."""
+    import re
+    from pathlib import Path
+
+    source = Path("content/salavatsteklo/example_posts.md").read_text(encoding="utf-8")
+    posts = [p.split("\n---")[0] for p in re.split(r"\n## \d\. ", source)[1:]]
+    assert len(posts) >= 5
+    for post in posts:
+        assert brand.check_text(post, SALAVATSTEKLO) == [], post[:60]

@@ -12,6 +12,8 @@ LLM-клиент, pydantic-settings, ruff, pytest.
 [подключение компании](docs/ONBOARDING_COMPANY.md) ·
 [выбор нейросети](docs/AI_OPTIONS.md) · [функции и ограничения](docs/FEATURES.md) ·
 [доработки](docs/ROADMAP.md) · [затраты](docs/COSTS.md) ·
+[сценарий демо](docs/DEMO.md) · [чек-лист функций](docs/FEATURE_CHECKLIST.md) ·
+[данные Салаватстекла](content/salavatsteklo/README.md) ·
 [решения](docs/DECISIONS.md) · [правила для Claude Code](CLAUDE.md)
 
 ---
