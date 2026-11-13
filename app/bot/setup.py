@@ -19,6 +19,7 @@ BOT_COMMANDS = [
     BotCommand(command="posts", description="Посты и статусы"),
     BotCommand(command="channel", description="Канал для публикаций"),
     BotCommand(command="comments", description="Комментарии и ответы"),
+    BotCommand(command="report", description="Отчёт за неделю"),
     BotCommand(command="status", description="Диагностика"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),
@@ -55,6 +56,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         costs,
         menu,
         onboarding,
+        reports,
         start,
     )
 
@@ -71,6 +73,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         admin.router,
         companies.router,
         costs.router,
+        reports.router,
         chat.router,  # ПОСЛЕДНИМ: ловит весь оставшийся текст
     )
     return dp

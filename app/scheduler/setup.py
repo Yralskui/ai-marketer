@@ -42,13 +42,10 @@ def create_scheduler(container: AppContainer) -> AsyncIOScheduler:
             **common,
         )
     if settings.enable_weekly_report:
-        scheduler.add_job(
-            jobs.weekly_report_job,
-            "cron",
-            day_of_week="mon",
-            hour=10,
-            minute=0,
-            id="weekly_report",
-            **common,
-        )
+        if settings.report_interval_minutes > 0:
+            # Режим демо: отчёт каждые N минут — видно, что задача работает сама
+            trigger: dict = {"trigger": "interval", "minutes": settings.report_interval_minutes}
+        else:
+            trigger = {"trigger": "cron", "day_of_week": "mon", "hour": 10, "minute": 0}
+        scheduler.add_job(jobs.weekly_report_job, id="weekly_report", **trigger, **common)
     return scheduler

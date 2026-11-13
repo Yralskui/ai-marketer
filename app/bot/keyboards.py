@@ -83,6 +83,7 @@ MENU_CHANNEL = "📣 Канал"
 MENU_STATUS = "📊 Статус"
 MENU_HELP = "❓ Помощь"
 MENU_COMMENTS = "💬 Комментарии"
+MENU_REPORT = "📈 Отчёт"
 MENU_COMPANIES = "🗂 Компании"
 MENU_NEW_COMPANY = "➕ Новая компания"
 MENU_INVITE = "🔗 Приглашение"
@@ -94,11 +95,11 @@ ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE, MENU_COSTS)
 def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     """Постоянное меню под полем ввода. У администратора — ещё ряд управления компаниями."""
     kb = ReplyKeyboardBuilder()
-    for text in (MENU_NEW_POST, MENU_POSTS, MENU_COMMENTS, MENU_PROFILE, MENU_MATERIALS):
+    for text in (MENU_NEW_POST, MENU_POSTS, MENU_COMMENTS, MENU_REPORT):
         kb.button(text=text)
-    for text in (MENU_CHANNEL, MENU_STATUS, MENU_HELP):
+    for text in (MENU_PROFILE, MENU_MATERIALS, MENU_CHANNEL, MENU_STATUS, MENU_HELP):
         kb.button(text=text)
-    sizes = [2, 1, 2, 3]
+    sizes = [2, 2, 2, 3]
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import keyboards as kb
 from app.bot import texts
-from app.bot.handlers import admin, chat, comments, companies, costs, onboarding, start
+from app.bot.handlers import admin, chat, comments, companies, costs, onboarding, reports, start
 from app.bot.states import MenuStates
 from app.container import AppContainer
 from app.db.models import Business, User
@@ -168,3 +168,18 @@ async def menu_comments(
 ) -> None:
     await state.clear()
     await comments.cmd_comments(message, session, business, bot)
+
+
+@router.message(F.text == kb.MENU_REPORT)
+async def menu_report(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    business: Business,
+    container: AppContainer,
+    bot: Bot,
+) -> None:
+    await state.clear()
+    await reports.cmd_report(
+        message, CommandObject(prefix="/", command="report"), session, business, container, bot
+    )

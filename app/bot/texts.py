@@ -35,6 +35,7 @@ HELP = (
     "/post N — открыть пост №N\n"
     "/channel — Telegram-канал для публикаций\n"
     "/comments — комментарии под постами и ответы на них\n"
+    "/report — отчёт: показатели, выводы и что сделать\n"
     "/status — диагностика\n"
     "/cancel — отменить текущее действие"
 )
@@ -384,3 +385,9 @@ def comments_overview(
     if not group_connected:
         text += COMMENTS_SETUP
     return text
+
+
+# --- поток B ---------------------------------------------------- отчёты
+
+REPORT_BUILDING = "📈 Собираю отчёт за {days} дн.…"
+REPORT_USAGE = "Отчёт за период: /report 7 (дней, от 1 до 90)."

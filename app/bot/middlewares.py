@@ -46,12 +46,12 @@ class DbSessionMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         tg_user: TgUser | None = data.get("event_from_user")
-        if tg_user is None:
+        if tg_user is None and not _is_reaction_update(event):
             return None  # посты в канале, служебные обновления — игнорируем
 
-        if _is_group_update(event):
-            # Группа обсуждения канала: пишут подписчики, доступа к боту у них нет.
-            # Обрабатывает только роутер comments, ему нужна лишь сессия.
+        if tg_user is None or _is_group_update(event):
+            # Группа обсуждения канала (пишут подписчики, доступа к боту у них нет) или
+            # счётчики реакций от Telegram. Хендлерам нужна только сессия.
             async with self.container.db.sessionmaker() as session:
                 data["session"] = session
                 try:
@@ -88,6 +88,11 @@ class DbSessionMiddleware(BaseMiddleware):
                 raise
             await session.commit()
             return result
+
+
+def _is_reaction_update(event: TelegramObject) -> bool:
+    """Счётчики реакций на пост канала — от Telegram, без пользователя."""
+    return isinstance(event, Update) and event.message_reaction_count is not None
 
 
 def _is_group_update(event: TelegramObject) -> bool:
