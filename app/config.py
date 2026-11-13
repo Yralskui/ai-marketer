@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     image_provider: str = "mock"
     image_api_key: str = ""
 
+    # --- Учёт расходов (цены в рублях; mock-провайдеры бесплатны) ---
+    llm_price_input_per_1m: float = 15.0
+    llm_price_output_per_1m: float = 60.0
+    image_price: float = 4.0
+
     # --- Хранилище ---
     database_url: str = ""
 

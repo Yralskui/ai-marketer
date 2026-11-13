@@ -23,6 +23,7 @@ from app.publishers.max import MaxPublisher
 from app.publishers.vk import VKPublisher
 from app.services.notifier import Notifier
 from app.services.publishing import PublishingService
+from app.services.usage import MeteredImages, MeteredLLM, Prices, UsageRecorder
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -58,11 +59,19 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         publishers[Platform.TELEGRAM] = TelegramPublisher(bot)
         notifier = BotNotifier(bot, settings)
 
+    async def alert_admins(text: str) -> None:
+        if notifier is not None:
+            for admin_id in settings.allowed_ids:
+                await notifier.send_text(admin_id, text)
+
+    # Учёт расходов: каждый вызов LLM и генерации картинок записывается на компанию
+    recorder = UsageRecorder(Prices.from_settings(settings), settings.tz, alert=alert_admins)
+
     return AppContainer(
         settings=settings,
         db=Database(settings.effective_database_url),
-        llm=create_llm(settings),
-        images=create_image_provider(settings),
+        llm=MeteredLLM(create_llm(settings), recorder, settings.llm_model),
+        images=MeteredImages(create_image_provider(settings), recorder),
         publishing=PublishingService(publishers, dry_run=settings.publish_dry_run),
         agent=Agent(
             default_registry,

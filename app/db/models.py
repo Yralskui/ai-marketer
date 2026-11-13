@@ -13,7 +13,18 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, str_enum
@@ -83,6 +94,7 @@ class EventType(StrEnum):
     PROFILE_UPDATED = "profile_updated"
     SOURCE_ADDED = "source_added"
     AGENT_ERROR = "agent_error"
+    BUDGET_EXCEEDED = "budget_exceeded"
     COMPANY_CREATED = "company_created"
     CLIENT_JOINED = "client_joined"
     CHANNEL_CHANGED = "channel_changed"
@@ -125,6 +137,9 @@ class Business(TimestampMixin, Base):
     invite_code: Mapped[str | None] = mapped_column(
         String(64), unique=True, index=True, nullable=True
     )
+    # Настройки компании без отдельных колонок: ai_budget_rub, auto_reply_comments,
+    # discussion_chat_id… Читать и менять — через app/services/accounts.py
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     owner: Mapped[User] = relationship(back_populates="businesses", foreign_keys=[owner_id])
     raw_sources: Mapped[list[Source]] = relationship(back_populates="business")
@@ -267,3 +282,29 @@ class EventLog(TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(64), index=True)
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+class UsageKind(StrEnum):
+    LLM = "llm"
+    IMAGE = "image"
+
+
+class UsageRecord(TimestampMixin, Base):
+    """Один платный вызов AI: запрос к LLM или генерация картинки. База учёта расходов."""
+
+    __tablename__ = "usage_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    business_id: Mapped[int | None] = mapped_column(
+        ForeignKey("businesses.id"), nullable=True, index=True
+    )
+    kind: Mapped[UsageKind] = mapped_column(str_enum(UsageKind))
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    task: Mapped[str] = mapped_column(String(64), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    images: Mapped[int] = mapped_column(Integer, default=0)
+    cost_rub: Mapped[float] = mapped_column(Float, default=0.0)
+    # True — провайдер не вернул число токенов, оно оценено по длине текста
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)

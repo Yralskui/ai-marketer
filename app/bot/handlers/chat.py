@@ -17,6 +17,7 @@ from app.bot import texts
 from app.container import AppContainer
 from app.db.models import Business, EventType, User
 from app.db.repositories import EventLogRepo
+from app.services.usage import BudgetExceededError
 
 log = logging.getLogger(__name__)
 router = Router(name="chat")
@@ -63,6 +64,9 @@ async def ask_agent(
         try:
             result = await container.agent.run(ctx, text)
         except AgentError as exc:
+            if isinstance(exc.__cause__, BudgetExceededError):
+                await message.answer(escape(str(exc.__cause__)))
+                return
             await EventLogRepo(session).log(
                 EventType.AGENT_ERROR, str(exc)[:500], business_id=business.id
             )

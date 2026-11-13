@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from sqlalchemy import DateTime, MetaData, inspect
+from sqlalchemy import DateTime, MetaData, inspect, text, update
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -71,11 +72,19 @@ class Database:
         )
 
     async def create_all(self) -> None:
-        """Создаёт таблицы (до появления миграций)."""
+        """Создаёт таблицы (до появления миграций).
+
+        Новые таблицы создаёт `create_all`. Новые колонки в существующих таблицах SQLite
+        добавляются автоматически (`ALTER TABLE ADD COLUMN` + значение по умолчанию), чтобы
+        после изменения моделей не приходилось удалять базу с данными. Переименования и
+        удаления колонок так не делаются — для них нужны миграции (Alembic, B9).
+        """
         from app.db import models  # noqa: F401  — регистрирует модели в metadata
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            if self.engine.dialect.name == "sqlite":
+                await conn.run_sync(_add_missing_columns)
             missing = await conn.run_sync(_missing_columns)
         if missing:
             raise SchemaOutdatedError(
@@ -90,7 +99,32 @@ class Database:
 
 
 class SchemaOutdatedError(RuntimeError):
-    """Файл БД создан старой версией кода: create_all не добавляет новые колонки."""
+    """Файл БД создан старой версией кода, и недостающие колонки не добавить автоматически."""
+
+
+def _add_missing_columns(sync_conn) -> None:  # type: ignore[no-untyped-def]
+    """SQLite: добавляет недостающие колонки и индексы, заполняя значения по умолчанию."""
+    log = logging.getLogger(__name__)
+    inspector = inspect(sync_conn)
+    for table in Base.metadata.sorted_tables:
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        added = False
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(dialect=sync_conn.dialect)
+            sync_conn.execute(
+                text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
+            )
+            default = column.default
+            if default is not None and (default.is_scalar or default.is_callable):
+                value = default.arg if default.is_scalar else default.arg(None)
+                sync_conn.execute(update(table).values({column.name: value}))
+            log.warning("БД: добавлена колонка %s.%s", table.name, column.name)
+            added = True
+        if added:
+            for index in table.indexes:
+                index.create(sync_conn, checkfirst=True)
 
 
 def _missing_columns(sync_conn) -> list[str]:  # type: ignore[no-untyped-def]

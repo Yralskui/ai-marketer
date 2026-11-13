@@ -85,8 +85,9 @@ MENU_HELP = "❓ Помощь"
 MENU_COMPANIES = "🗂 Компании"
 MENU_NEW_COMPANY = "➕ Новая компания"
 MENU_INVITE = "🔗 Приглашение"
+MENU_COSTS = "💰 Расходы"
 
-ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE)
+ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE, MENU_COSTS)
 
 
 def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
@@ -100,7 +101,7 @@ def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)
-        sizes.append(3)
+        sizes += [2, 2]
     kb.adjust(*sizes)
     return kb.as_markup(
         resize_keyboard=True,
