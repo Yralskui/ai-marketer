@@ -8,7 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
 class PostCb(CallbackData, prefix="post"):
-    """Кнопки под черновиком. action: publish | schedule | edit | reject."""
+    """Кнопки под черновиком. action: publish | schedule | edit | photo | reject."""
 
     action: str
     post_id: int
@@ -29,8 +29,9 @@ def draft_keyboard(post_id: int) -> InlineKeyboardMarkup:
     )
     kb.button(text="🕒 Запланировать", callback_data=PostCb(action="schedule", post_id=post_id))
     kb.button(text="✏️ Изменить", callback_data=PostCb(action="edit", post_id=post_id))
+    kb.button(text="🖼 Своё фото", callback_data=PostCb(action="photo", post_id=post_id))
     kb.button(text="❌ Отклонить", callback_data=PostCb(action="reject", post_id=post_id))
-    kb.adjust(1, 2, 1)
+    kb.adjust(1, 2, 2)
     return kb.as_markup()
 
 
@@ -84,6 +85,7 @@ MENU_STATUS = "📊 Статус"
 MENU_HELP = "❓ Помощь"
 MENU_COMMENTS = "💬 Комментарии"
 MENU_REPORT = "📈 Отчёт"
+MENU_PHOTOS = "🖼 Фотобанк"
 MENU_COMPANIES = "🗂 Компании"
 MENU_NEW_COMPANY = "➕ Новая компания"
 MENU_INVITE = "🔗 Приглашение"
@@ -106,9 +108,9 @@ def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
     for text in (MENU_NEW_POST, MENU_POSTS, MENU_COMMENTS, MENU_REPORT):
         kb.button(text=text)
-    for text in (MENU_PROFILE, MENU_MATERIALS, MENU_CHANNEL, MENU_STATUS, MENU_HELP):
+    for text in (MENU_PROFILE, MENU_MATERIALS, MENU_PHOTOS, MENU_CHANNEL, MENU_STATUS, MENU_HELP):
         kb.button(text=text)
-    sizes = [2, 2, 2, 3]
+    sizes = [2, 2, 3, 3]
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)
@@ -165,5 +167,32 @@ def clients_keyboard(clients: list[tuple[int, str, bool]]) -> InlineKeyboardMark
                 text=f"✅ Вернуть {name[:30]}",
                 callback_data=ClientCb(action="restore", user_id=user_id),
             )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- фотобанк
+
+
+class MediaCb(CallbackData, prefix="media"):
+    """action: post (сделать пост с этим фото) | keep (только сохранить)."""
+
+    action: str
+    media_id: int
+
+
+def photo_keyboard(media_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📝 Пост с этим фото", callback_data=MediaCb(action="post", media_id=media_id))
+    kb.button(text="🗂 Только сохранить", callback_data=MediaCb(action="keep", media_id=media_id))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def photos_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for media_id, caption in items:
+        label = f"📝 Пост с фото #{media_id}" + (f" · {caption[:20]}" if caption else "")
+        kb.button(text=label, callback_data=MediaCb(action="post", media_id=media_id))
     kb.adjust(1)
     return kb.as_markup()
