@@ -3,6 +3,7 @@
 from app.db.repositories.agent_message import AgentMessageRepo
 from app.db.repositories.business import BusinessRepo
 from app.db.repositories.channel import ChannelRepo
+from app.db.repositories.comment import CommentRepo
 from app.db.repositories.content_plan import ContentPlanRepo
 from app.db.repositories.event_log import EventLogRepo
 from app.db.repositories.post import PostRepo
@@ -13,6 +14,7 @@ __all__ = [
     "AgentMessageRepo",
     "BusinessRepo",
     "ChannelRepo",
+    "CommentRepo",
     "ContentPlanRepo",
     "EventLogRepo",
     "PostRepo",

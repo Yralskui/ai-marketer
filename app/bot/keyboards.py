@@ -82,6 +82,7 @@ MENU_MATERIALS = "📚 Материалы"
 MENU_CHANNEL = "📣 Канал"
 MENU_STATUS = "📊 Статус"
 MENU_HELP = "❓ Помощь"
+MENU_COMMENTS = "💬 Комментарии"
 MENU_COMPANIES = "🗂 Компании"
 MENU_NEW_COMPANY = "➕ Новая компания"
 MENU_INVITE = "🔗 Приглашение"
@@ -93,11 +94,11 @@ ADMIN_MENU_BUTTONS = (MENU_COMPANIES, MENU_NEW_COMPANY, MENU_INVITE, MENU_COSTS)
 def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
     """Постоянное меню под полем ввода. У администратора — ещё ряд управления компаниями."""
     kb = ReplyKeyboardBuilder()
-    for text in (MENU_NEW_POST, MENU_POSTS, MENU_PROFILE, MENU_MATERIALS):
+    for text in (MENU_NEW_POST, MENU_POSTS, MENU_COMMENTS, MENU_PROFILE, MENU_MATERIALS):
         kb.button(text=text)
     for text in (MENU_CHANNEL, MENU_STATUS, MENU_HELP):
         kb.button(text=text)
-    sizes = [2, 2, 3]
+    sizes = [2, 1, 2, 3]
     if admin:
         for text in ADMIN_MENU_BUTTONS:
             kb.button(text=text)
@@ -108,3 +109,24 @@ def main_menu(*, admin: bool) -> ReplyKeyboardMarkup:
         is_persistent=True,
         input_field_placeholder="Напишите задачу или выберите кнопку",
     )
+
+
+# --- поток B ---------------------------------------------------- комментарии
+
+
+class CommentCb(CallbackData, prefix="cmt"):
+    """Кнопки под карточкой комментария. action: send | edit | skip."""
+
+    action: str
+    comment_id: int
+
+
+def comment_keyboard(comment_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✅ Отправить ответ", callback_data=CommentCb(action="send", comment_id=comment_id)
+    )
+    kb.button(text="✏️ Свой ответ", callback_data=CommentCb(action="edit", comment_id=comment_id))
+    kb.button(text="🙈 Пропустить", callback_data=CommentCb(action="skip", comment_id=comment_id))
+    kb.adjust(1, 2)
+    return kb.as_markup()

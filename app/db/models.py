@@ -95,6 +95,8 @@ class EventType(StrEnum):
     SOURCE_ADDED = "source_added"
     AGENT_ERROR = "agent_error"
     BUDGET_EXCEEDED = "budget_exceeded"
+    COMMENT_RECEIVED = "comment_received"
+    COMMENT_REPLIED = "comment_replied"
     COMPANY_CREATED = "company_created"
     CLIENT_JOINED = "client_joined"
     CHANNEL_CHANGED = "channel_changed"
@@ -308,3 +310,34 @@ class UsageRecord(TimestampMixin, Base):
     cost_rub: Mapped[float] = mapped_column(Float, default=0.0)
     # True — провайдер не вернул число токенов, оно оценено по длине текста
     estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CommentStatus(StrEnum):
+    NEW = "new"  # только пришёл, ответ ещё не готов
+    PENDING = "pending"  # черновик ответа отправлен ответственному на согласование
+    SENT = "sent"  # ответ опубликован под комментарием
+    SKIPPED = "skipped"  # решили не отвечать
+
+
+class Comment(TimestampMixin, Base):
+    """Комментарий подписчика в группе обсуждения канала и наш ответ на него."""
+
+    __tablename__ = "comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), index=True)
+    post_id: Mapped[int | None] = mapped_column(ForeignKey("posts.id"), nullable=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)  # группа обсуждения
+    message_id: Mapped[int] = mapped_column(Integer)
+    author_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    author_name: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[CommentStatus] = mapped_column(
+        str_enum(CommentStatus), default=CommentStatus.NEW, index=True
+    )
+    reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Почему ответ не ушёл автоматически (жалоба, вопрос о деньгах…)
+    needs_human_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reply_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auto_replied: Mapped[bool] = mapped_column(Boolean, default=False)

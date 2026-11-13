@@ -41,6 +41,12 @@ class PostRepo:
         )
         return result.rowcount == 1
 
+    async def find_published(self, channel_id: int, external_id: str) -> Post | None:
+        result = await self.session.execute(
+            select(Post).where(Post.channel_id == channel_id, Post.external_id == external_id)
+        )
+        return result.scalars().first()
+
     async def get_for_business(self, post_id: int, business_id: int) -> Post | None:
         post = await self.get(post_id)
         if post is None or post.business_id != business_id:

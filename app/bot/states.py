@@ -15,3 +15,7 @@ class ApprovalStates(StatesGroup):
 class MenuStates(StatesGroup):
     waiting_post_topic = State()  # «✍️ Новый пост» — ждём тему
     waiting_company_name = State()  # «➕ Новая компания» — ждём название
+
+
+class CommentStates(StatesGroup):
+    waiting_reply = State()  # свой текст ответа на комментарий; в data: comment_id

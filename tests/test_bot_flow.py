@@ -17,10 +17,10 @@ from typing import Any
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, MessageOriginChannel, Update, User
 
 from app.bot import keyboards as kb
-from app.bot.keyboards import PostCb
+from app.bot.keyboards import CommentCb, PostCb
 from app.bot.setup import create_dispatcher
 from app.container import build_container
 from app.db.models import PostStatus
@@ -30,6 +30,7 @@ from app.scheduler.setup import create_scheduler
 OWNER_ID = 111
 STRANGER_ID = 666
 CLIENT_ID = 222
+COMMENTER_ID = 333
 
 
 class FakeSession(BaseSession):
@@ -102,19 +103,53 @@ def msg(uid: int, text: str) -> Update:
 
 
 def press(uid: int, action: str, post_id: int) -> Update:
+    return press_data(uid, PostCb(action=action, post_id=post_id).pack())
+
+
+def press_data(uid: int, data: str) -> Update:
     return Update(
         update_id=next(_update_ids),
         callback_query=CallbackQuery(
             id=str(next(_update_ids)),
             from_user=_user(uid),
             chat_instance="test",
-            data=PostCb(action=action, post_id=post_id).pack(),
+            data=data,
             message=Message(
                 message_id=next(_update_ids),
                 date=datetime.now(),
                 chat=Chat(id=uid, type="private"),
                 text="черновик",
             ),
+        ),
+    )
+
+
+GROUP_ID = -100555
+CHANNEL_CHAT = Chat(id=-1001234567890, type="channel", username="test_channel")
+
+
+def group_comment(uid: int, text: str, channel_message_id: int) -> Update:
+    """Комментарий в группе обсуждения — ответ на автоматически пересланный пост канала."""
+    root = Message(
+        message_id=next(_update_ids),
+        date=datetime.now(),
+        chat=Chat(id=GROUP_ID, type="supergroup"),
+        sender_chat=CHANNEL_CHAT,
+        is_automatic_forward=True,
+        forward_origin=MessageOriginChannel(
+            date=datetime.now(), chat=CHANNEL_CHAT, message_id=channel_message_id
+        ),
+        text="пост канала",
+    )
+    return Update(
+        update_id=next(_update_ids),
+        message=Message(
+            message_id=next(_update_ids),
+            date=datetime.now(),
+            chat=Chat(id=GROUP_ID, type="supergroup"),
+            from_user=User(id=COMMENTER_ID, is_bot=False, first_name="Анна"),
+            text=text,
+            reply_to_message=root,
         ),
     )
 
@@ -192,6 +227,40 @@ async def test_end_to_end_bot_flow(settings):
     fake.clear()
     await feed(bot, press(OWNER_ID, "publish", post1))
     assert fake.sent_texts("@test_channel") == []
+
+    # 💬 Комментарий подписчика под постом -> карточка владельцу -> «Отправить» -> ответ
+    async with container.db.sessionmaker() as s:
+        channel_message_id = int((await PostRepo(s).get(post1)).external_id)
+    fake.clear()
+    await feed(
+        bot,
+        group_comment(
+            COMMENTER_ID, "Выглядит вкусно! А тыквенный латте будет?", channel_message_id
+        ),
+    )
+    card = fake.sent_texts(OWNER_ID)[-1]
+    assert "Новый комментарий" in card and f"к посту #{post1}" in card and "Анна" in card
+    assert fake.sent_texts(GROUP_ID) == []  # без разрешения в группу ничего не ушло
+    card_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
+    send_data = card_msg.reply_markup.inline_keyboard[0][0].callback_data
+    assert CommentCb.unpack(send_data).action == "send"
+    await feed(bot, press_data(OWNER_ID, send_data))
+    replies = [
+        r
+        for r in fake.requests
+        if type(r).__name__ == "SendMessage" and str(r.chat_id) == str(GROUP_ID)
+    ]
+    assert len(replies) == 1 and "Анна" in replies[0].text
+    await feed(bot, press_data(OWNER_ID, send_data))  # повторное нажатие — без второго ответа
+    replies = [
+        r
+        for r in fake.requests
+        if type(r).__name__ == "SendMessage" and str(r.chat_id) == str(GROUP_ID)
+    ]
+    assert len(replies) == 1
+    await feed(bot, msg(OWNER_ID, "/comments"))
+    overview = fake.sent_texts(OWNER_ID)[-1]
+    assert "подключена ✅" in overview and "✅ <b>Анна" in overview
 
     # 🕒 Запланировать
     await feed(bot, msg(OWNER_ID, "Подготовь пост про скидки на выходных"))
