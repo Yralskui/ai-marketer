@@ -91,6 +91,7 @@ class EventType(StrEnum):
     POST_SCHEDULED = "post_scheduled"
     POST_PUBLISHED = "post_published"
     POST_FAILED = "post_failed"
+    POST_DELETED = "post_deleted"
     PROFILE_UPDATED = "profile_updated"
     SOURCE_ADDED = "source_added"
     AGENT_ERROR = "agent_error"

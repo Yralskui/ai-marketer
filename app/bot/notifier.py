@@ -15,6 +15,8 @@ from app.db.models import Post
 
 log = logging.getLogger(__name__)
 
+CAPTION_LIMIT = 1024
+
 
 ChannelLookup = Callable[[Post], Awaitable[str | None]]
 
@@ -35,19 +37,26 @@ class BotNotifier:
                 channel = await self.channel_lookup(post)
             except Exception:
                 log.debug("Не удалось узнать канал поста #%s", post.id, exc_info=True)
+        tz = self.settings.tz
+        keyboard = keyboards.draft_keyboard(post.id)
         if post.image_path and Path(post.image_path).exists():
+            # Превью ровно как в канале: фото с подписью, без нашей разметки
+            if len(post.text) <= CAPTION_LIMIT:
+                await self.bot.send_photo(
+                    chat_id, FSInputFile(post.image_path), caption=post.text, parse_mode=None
+                )
+                card = texts.draft_card(post, revision_no, channel=channel, tz=tz, with_text=False)
+                await self.bot.send_message(chat_id, card, reply_markup=keyboard)
+                return
             await self.bot.send_photo(chat_id, FSInputFile(post.image_path))
         await self.bot.send_message(
             chat_id,
-            texts.draft_card(post, revision_no, channel=channel, tz=self.settings.tz),
-            reply_markup=keyboards.draft_keyboard(post.id),
+            texts.draft_card(post, revision_no, channel=channel, tz=tz),
+            reply_markup=keyboard,
         )
 
     async def send_text(self, chat_id: int, text: str) -> None:
         await self.bot.send_message(chat_id, text)
-
-
-CAPTION_LIMIT = 1024
 
 
 async def send_report(bot: Bot, chat_id: int, report) -> None:  # type: ignore[no-untyped-def]

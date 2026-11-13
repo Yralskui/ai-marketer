@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from html import escape
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
-from app.bot.keyboards import CompanyCb, companies_keyboard
+from app.bot.keyboards import (
+    CHANNEL_PICK_REQUEST_ID,
+    CompanyCb,
+    channel_picker_keyboard,
+    companies_keyboard,
+    main_menu,
+)
 from app.container import AppContainer
-from app.db.models import Business, Platform, User
+from app.db.models import Business, Channel, Platform, User
 from app.db.repositories import ChannelRepo
 from app.services import accounts
-from app.services.accounts import CompanyError
+from app.services.accounts import Account, CompanyError
 
 router = Router(name="companies")
 
@@ -134,18 +140,31 @@ async def cmd_channel(
     company = escape(business.name)
     raw = (command.args or "").strip()
     if not raw:
+        # Без аргумента — кнопка нативного выбора канала: ID искать не нужно
         channel = await ChannelRepo(session).get_active(business.id, Platform.TELEGRAM)
-        shown = f"<code>{escape(channel.external_id)}</code>" if channel else texts.CHANNEL_NOT_SET
-        await message.answer(texts.CHANNEL_CURRENT.format(company=company, channel=shown))
+        shown = (
+            f"<code>{escape(channel.title or channel.external_id)}</code>"
+            if channel
+            else texts.CHANNEL_NOT_SET
+        )
+        await message.answer(
+            texts.CHANNEL_CURRENT.format(company=company, channel=shown)
+            + "\n\n"
+            + texts.CHANNEL_PICK_HINT,
+            reply_markup=channel_picker_keyboard(),
+        )
         return
     try:
         channel = await accounts.set_channel(session, business, raw, db_user)
     except CompanyError as exc:
         await message.answer(escape(str(exc)))
         return
+    await message.answer(await _channel_saved_text(channel, company, container))
 
+
+async def _channel_saved_text(channel: Channel, company: str, container: AppContainer) -> str:
     text = texts.CHANNEL_SAVED.format(
-        channel=f"<code>{escape(channel.external_id)}</code>", company=company
+        channel=f"<code>{escape(channel.title or channel.external_id)}</code>", company=company
     )
     publisher = container.publishing.get_publisher(Platform.TELEGRAM)
     if publisher is not None:
@@ -153,4 +172,32 @@ async def cmd_channel(
         text += texts.CHANNEL_CHECK.format(
             mark="✅" if check.ok else "❌", message=escape(check.message)
         )
-    await message.answer(text)
+    return text
+
+
+@router.message(F.chat_shared)
+async def on_channel_shared(
+    message: Message,
+    session: AsyncSession,
+    db_user: User,
+    business: Business,
+    container: AppContainer,
+    account: Account,
+) -> None:
+    """Клиент выбрал канал нативной кнопкой Telegram — бот уже добавлен админом."""
+    shared = message.chat_shared
+    if shared is None or shared.request_id != CHANNEL_PICK_REQUEST_ID:
+        return
+    menu = main_menu(admin=account.is_admin)
+    try:
+        channel = await accounts.set_channel(session, business, str(shared.chat_id), db_user)
+    except CompanyError as exc:
+        await message.answer(
+            texts.CHANNEL_PICKED_FAILED.format(error=escape(str(exc))), reply_markup=menu
+        )
+        return
+    if shared.title:
+        channel.title = shared.title[:255]
+    await message.answer(
+        await _channel_saved_text(channel, escape(business.name), container), reply_markup=menu
+    )

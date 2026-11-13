@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+from aiogram.types import (
+    ChatAdministratorRights,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestChat,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
@@ -81,7 +87,7 @@ MENU_POSTS = "📋 Мои посты"
 MENU_PROFILE = "🏢 О компании"
 MENU_MATERIALS = "📚 Материалы"
 MENU_CHANNEL = "📣 Канал"
-MENU_STATUS = "📊 Статус"
+MENU_STATUS = "📊 Состояние"
 MENU_HELP = "❓ Помощь"
 MENU_COMMENTS = "💬 Комментарии"
 MENU_REPORT = "📈 Отчёт"
@@ -196,3 +202,168 @@ def photos_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
         kb.button(text=label, callback_data=MediaCb(action="post", media_id=media_id))
     kb.adjust(1)
     return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- быстрые действия с постом
+
+# Быстрые правки: код -> (кнопка, инструкция для LLM)
+QUICK_EDITS: dict[str, tuple[str, str]] = {
+    "short": ("✂️ Короче", "Сделай текст заметно короче, оставь главное."),
+    "long": ("➕ Подробнее", "Сделай текст подробнее: добавь деталей и пользы для читателя."),
+    "emoji": ("😊 Эмодзи", "Добавь уместные эмодзи, не перебарщивай."),
+    "formal": ("👔 Официальнее", "Сделай тон более деловым и официальным."),
+    "warm": ("🤗 Теплее", "Сделай тон проще, теплее и дружелюбнее."),
+    "cta": ("📣 Призыв", "Добавь в конце понятный призыв к действию."),
+    "new": ("🔄 Другой вариант", "Напиши другой вариант на ту же тему, с другим заходом."),
+}
+
+
+class QuickEditCb(CallbackData, prefix="qe"):
+    post_id: int
+    code: str
+
+
+def quick_edit_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for code, (label, _) in QUICK_EDITS.items():
+        kb.button(text=label, callback_data=QuickEditCb(post_id=post_id, code=code))
+    kb.button(text="Отмена", callback_data=CancelCb())
+    kb.adjust(2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+class TimeCb(CallbackData, prefix="tm"):
+    """Запланировать на время ts (unix, секунды)."""
+
+    post_id: int
+    ts: int
+
+
+def schedule_keyboard(post_id: int, options: list[tuple[str, int]]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for label, ts in options:
+        kb.button(text=f"🕒 {label}", callback_data=TimeCb(post_id=post_id, ts=ts))
+    kb.button(text="Отмена", callback_data=CancelCb())
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+class PublishedCb(CallbackData, prefix="pub"):
+    """action: delete (спросить) | delete_yes | delete_no."""
+
+    action: str
+    post_id: int
+
+
+def published_keyboard(post_id: int, url: str | None) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if url:
+        kb.button(text="🔗 Открыть в канале", url=url)
+    kb.button(
+        text="🗑 Удалить из канала", callback_data=PublishedCb(action="delete", post_id=post_id)
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def delete_confirm_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да, удалить", callback_data=PublishedCb(action="delete_yes", post_id=post_id))
+    kb.button(text="Нет", callback_data=PublishedCb(action="delete_no", post_id=post_id))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def retry_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔁 Повторить", callback_data=PostCb(action="publish", post_id=post_id))
+    kb.button(text="❌ Отклонить", callback_data=PostCb(action="reject", post_id=post_id))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- список постов
+
+
+class PostViewCb(CallbackData, prefix="pv"):
+    post_id: int
+
+
+class PostsFilterCb(CallbackData, prefix="pf"):
+    """status: all | pending | scheduled | published."""
+
+    status: str
+
+
+POST_FILTERS: dict[str, str] = {
+    "all": "Все",
+    "pending": "⏳ Ждут",
+    "scheduled": "🕒 В плане",
+    "published": "✅ Вышли",
+}
+
+
+class MenuCb(CallbackData, prefix="menu"):
+    """Кнопки-переходы из пустых состояний. action: new_post."""
+
+    action: str
+
+
+def posts_keyboard(items: list[tuple[int, str]], current: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for code, label in POST_FILTERS.items():
+        mark = "• " if code == current else ""
+        kb.button(text=f"{mark}{label}", callback_data=PostsFilterCb(status=code))
+    for post_id, label in items:
+        kb.button(text=label[:60], callback_data=PostViewCb(post_id=post_id))
+    kb.button(text="✍️ Новый пост", callback_data=MenuCb(action="new_post"))
+    kb.adjust(4, *([1] * len(items)), 1)
+    return kb.as_markup()
+
+
+def new_post_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✍️ Создать пост", callback_data=MenuCb(action="new_post"))
+    return kb.as_markup()
+
+
+# --- поток B ---------------------------------------------------- выбор канала
+
+CHANNEL_PICK_REQUEST_ID = 1
+MENU_BACK = "↩️ В меню"
+CHANNEL_PICK_BUTTON = "📣 Выбрать канал"
+
+
+def channel_picker_keyboard() -> ReplyKeyboardMarkup:
+    """Нативный выбор канала Telegram: бот сразу получает права админа на публикацию."""
+    rights = ChatAdministratorRights(
+        is_anonymous=False,
+        can_manage_chat=True,
+        can_delete_messages=True,
+        can_manage_video_chats=False,
+        can_restrict_members=False,
+        can_promote_members=False,
+        can_change_info=False,
+        can_invite_users=False,
+        can_post_stories=False,
+        can_edit_stories=False,
+        can_delete_stories=False,
+        can_send_welcome_messages=False,
+        can_post_messages=True,
+        can_edit_messages=True,
+    )
+    pick = KeyboardButton(
+        text=CHANNEL_PICK_BUTTON,
+        request_chat=KeyboardButtonRequestChat(
+            request_id=CHANNEL_PICK_REQUEST_ID,
+            chat_is_channel=True,
+            bot_administrator_rights=rights,
+            request_title=True,
+            request_username=True,
+        ),
+    )
+    return ReplyKeyboardMarkup(
+        keyboard=[[pick], [KeyboardButton(text=MENU_BACK)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )

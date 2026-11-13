@@ -60,19 +60,24 @@ async def ask_agent(
         notifier=container.notifier,
         chat_id=message.chat.id,
     )
+    # Пока модель думает (с настоящей LLM — 10–30 с), видно, что бот работает
+    progress = await message.answer(texts.WORKING)
+    answer = texts.AGENT_ERROR
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
         try:
-            result = await container.agent.run(ctx, text)
+            answer = escape((await container.agent.run(ctx, text)).text)
         except AgentError as exc:
             if isinstance(exc.__cause__, BudgetExceededError):
-                await message.answer(escape(str(exc.__cause__)))
-                return
-            await EventLogRepo(session).log(
-                EventType.AGENT_ERROR, str(exc)[:500], business_id=business.id
-            )
-            await message.answer(texts.AGENT_ERROR)
-            return
-    await message.answer(escape(result.text))
+                answer = escape(str(exc.__cause__))
+            else:
+                await EventLogRepo(session).log(
+                    EventType.AGENT_ERROR, str(exc)[:500], business_id=business.id
+                )
+    try:
+        await progress.delete()
+    except Exception:
+        log.debug("Не удалось удалить сообщение «работаю»", exc_info=True)
+    await message.answer(answer)
 
 
 @router.message(StateFilter(None), F.document)
