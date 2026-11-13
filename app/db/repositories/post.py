@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Post, PostRevision, PostStatus
@@ -19,6 +20,26 @@ class PostRepo:
 
     async def get(self, post_id: int) -> Post | None:
         return await self.session.get(Post, post_id)
+
+    async def claim_for_publish(
+        self, post_id: int, attempts_seen: int, statuses: Iterable[PostStatus]
+    ) -> bool:
+        """Атомарно занимает пост под публикацию: увеличивает publish_attempts, только если
+        пост всё ещё в одном из `statuses` и его никто не занял после нашего чтения.
+
+        False — пост уже публикует другой обработчик (или уже опубликовал).
+        """
+        result = await self.session.execute(
+            update(Post)
+            .where(
+                Post.id == post_id,
+                Post.status.in_(list(statuses)),
+                Post.publish_attempts == attempts_seen,
+            )
+            .values(publish_attempts=attempts_seen + 1)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
     async def get_for_business(self, post_id: int, business_id: int) -> Post | None:
         post = await self.get(post_id)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -32,8 +33,12 @@ async def publish_due_posts(
     publishing: PublishingService,
     notifier: Notifier | None = None,
     now: datetime | None = None,
+    admin_chat_ids: Iterable[int] = (),
 ) -> int:
-    """Публикует запланированные посты, время которых наступило. Возвращает число успешных."""
+    """Публикует запланированные посты, время которых наступило. Возвращает число успешных.
+
+    Результат сообщается ответственному за компанию; о сбое — ещё и администраторам.
+    """
     now = now or utcnow()
     published = 0
     async with sessionmaker() as session:
@@ -44,7 +49,10 @@ async def publish_due_posts(
             except PublishNotAllowedError:
                 log.error("Пост #%s в расписании, но не одобрен — пропускаю", post.id)
                 continue
+            if outcome.skipped:
+                continue
             chat_id = await _owner_chat_id(session, post.business_id)
+            recipients = [chat_id] if chat_id else []
             if outcome.ok:
                 published += 1
                 text = f"✅ Запланированный пост #{post.id} опубликован."
@@ -54,11 +62,12 @@ async def publish_due_posts(
                 text = (
                     f"⚠️ Не удалось опубликовать пост #{post.id}: {html.escape(outcome.error or '')}"
                 )
-            if notifier and chat_id:
+                recipients += [a for a in admin_chat_ids if a not in recipients]
+            for recipient in recipients if notifier else []:
                 try:
-                    await notifier.send_text(chat_id, text)
+                    await notifier.send_text(recipient, text)
                 except Exception:
-                    log.exception("Не удалось уведомить владельца о посте #%s", post.id)
+                    log.exception("Не удалось уведомить %s о посте #%s", recipient, post.id)
     if due:
         log.info("publish_due_posts: к публикации %d, опубликовано %d", len(due), published)
     return published
@@ -114,7 +123,12 @@ async def _owner_chat_id(session: AsyncSession, business_id: int) -> int | None:
 
 async def publish_due_posts_job(container: AppContainer) -> None:
     try:
-        await publish_due_posts(container.db.sessionmaker, container.publishing, container.notifier)
+        await publish_due_posts(
+            container.db.sessionmaker,
+            container.publishing,
+            container.notifier,
+            admin_chat_ids=sorted(container.settings.allowed_ids),
+        )
     except Exception:
         log.exception("Сбой задачи publish_due_posts")
 
