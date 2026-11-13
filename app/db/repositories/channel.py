@@ -26,6 +26,20 @@ class ChannelRepo:
         )
         return result.scalar_one_or_none()
 
+    async def find_telegram(self, chat_id: int, username: str | None) -> list[Channel]:
+        """Активные Telegram-каналы, которые указывают на этот чат (по ID или @username)."""
+        ids = [str(chat_id)]
+        if username:
+            ids += [f"@{username}", f"@{username.lower()}"]
+        result = await self.session.execute(
+            select(Channel).where(
+                Channel.platform == Platform.TELEGRAM,
+                Channel.is_active.is_(True),
+                Channel.external_id.in_(ids),
+            )
+        )
+        return list(result.scalars())
+
     async def upsert(
         self, business_id: int, platform: Platform, external_id: str, title: str = ""
     ) -> Channel:

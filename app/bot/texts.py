@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import tzinfo
 from html import escape
 
-from app.db.models import Post, PostStatus
+from app.db.models import Comment, CommentStatus, Post, PostStatus
 from app.services.business_profile import PROFILE_FIELD_TITLES, BusinessProfile
 from app.services.posts import PLATFORM_TITLES, STATUS_TITLES
 from app.utils.time import format_local
@@ -34,6 +34,7 @@ HELP = (
     "/posts — последние посты и статусы\n"
     "/post N — открыть пост №N\n"
     "/channel — Telegram-канал для публикаций\n"
+    "/comments — комментарии под постами и ответы на них\n"
     "/status — диагностика\n"
     "/cancel — отменить текущее действие"
 )
@@ -304,3 +305,82 @@ def cost_line(
         f"{mark}<b>#{business_id}</b> {escape(name)}: <b>{cost:.2f} ₽</b>{limit}{warn}\n"
         f"    запросов к AI: {calls}, токенов: {approx}{tokens_text}, картинок: {images}"
     )
+
+
+# --- поток B ---------------------------------------------------- комментарии
+
+COMMENT_NOT_FOUND = "Комментарий не найден."
+COMMENT_SENT = "✅ Ответ опубликован под комментарием."
+COMMENT_SKIPPED = "Пропустил — отвечать не будем."
+COMMENT_ALREADY_DONE = "На этот комментарий уже ответили или его пропустили."
+COMMENT_SEND_FAILED = (
+    "⚠️ Не получилось ответить: проверьте, что бот — администратор группы обсуждения."
+)
+ASK_COMMENT_REPLY = "✏️ Напишите свой ответ — я опубликую его под комментарием как есть."
+AUTOREPLY_USAGE = (
+    "Автоответ на комментарии: /autoreply on — включить, /autoreply off — выключить.\n"
+    "Даже с автоответом жалобы, негатив и вопросы о деньгах придут вам на согласование."
+)
+AUTOREPLY_ON = (
+    "🤖 Автоответ для <b>{company}</b> включён: на обычные комментарии я отвечаю сам и "
+    "сообщаю вам. Жалобы и спорные вопросы по-прежнему приходят на согласование."
+)
+AUTOREPLY_OFF = (
+    "🤖 Автоответ для <b>{company}</b> выключен: каждый ответ — после вашего «Отправить»."
+)
+COMMENTS_SETUP = (
+    "\n\n<b>Как подключить комментарии</b>\n"
+    "1. Канал → Управление каналом → Обсуждение → привяжите группу.\n"
+    "2. Добавьте бота в эту группу администратором.\n"
+    "3. Как только под постом появится комментарий, я пришлю черновик ответа."
+)
+COMMENT_STATUS_ICONS = {
+    CommentStatus.NEW: "🆕",
+    CommentStatus.PENDING: "⏳",
+    CommentStatus.SENT: "✅",
+    CommentStatus.SKIPPED: "🙈",
+}
+
+
+def comment_card(comment: Comment, company: str, post: Post | None) -> str:
+    where = f"к посту #{post.id}" if post else "в обсуждении канала"
+    text = (
+        f"💬 <b>Новый комментарий</b> · {escape(company)} · {where}\n\n"
+        f"<b>{escape(comment.author_name or 'Подписчик')}:</b> {escape(comment.text[:1500])}\n\n"
+        f"🤖 <b>Предлагаю ответить:</b>\n{escape(comment.reply_text or '')}"
+    )
+    if comment.needs_human_reason:
+        text += f"\n\n⚠️ Нужен ваш взгляд: {escape(comment.needs_human_reason)}"
+    return text
+
+
+def comment_auto_notice(comment: Comment) -> str:
+    return (
+        f"🤖 Ответил на комментарий <b>{escape(comment.author_name or 'подписчика')}</b>:\n"
+        f"<i>{escape(comment.text[:300])}</i>\n→ {escape(comment.reply_text or '')}"
+    )
+
+
+def comments_overview(
+    company: str, *, auto: bool, group_connected: bool, items: list[Comment]
+) -> str:
+    text = (
+        f"💬 <b>Комментарии</b> · {escape(company)}\n"
+        f"Группа обсуждения: {'подключена ✅' if group_connected else 'не найдена ❌'}\n"
+        f"Автоответ: {'включён 🤖' if auto else 'выключен — отвечаю после согласования'}"
+        " (/autoreply on|off — администратор)\n"
+    )
+    if items:
+        lines = []
+        for c in items:
+            icon = COMMENT_STATUS_ICONS.get(CommentStatus(c.status), "")
+            line = f"{icon} <b>{escape(c.author_name or 'подписчик')}:</b> {escape(c.text[:60])}"
+            if c.status == CommentStatus.SENT and c.reply_text:
+                line += f"\n    → {escape(c.reply_text[:80])}"
+            lines.append(line)
+        text += "\n" + "\n".join(lines)
+    else:
+        text += "\nКомментариев пока нет."
+    if not group_connected:
+        text += COMMENTS_SETUP
+    return text

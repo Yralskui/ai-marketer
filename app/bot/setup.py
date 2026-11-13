@@ -18,6 +18,7 @@ BOT_COMMANDS = [
     BotCommand(command="profile", description="Профиль бизнеса"),
     BotCommand(command="posts", description="Посты и статусы"),
     BotCommand(command="channel", description="Канал для публикаций"),
+    BotCommand(command="comments", description="Комментарии и ответы"),
     BotCommand(command="status", description="Диагностика"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),
@@ -31,6 +32,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="invite", description="Ссылка-приглашение клиента (админ)"),
     BotCommand(command="costs", description="Расходы на AI (админ)"),
     BotCommand(command="budget", description="Лимит расходов компании (админ)"),
+    BotCommand(command="autoreply", description="Автоответ на комментарии (админ)"),
     *BOT_COMMANDS[1:],
 ]
 
@@ -48,6 +50,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
         admin,
         approval,
         chat,
+        comments,
         companies,
         costs,
         menu,
@@ -60,6 +63,7 @@ def create_dispatcher(container: AppContainer) -> Dispatcher:
     dp["container"] = container
     dp.update.outer_middleware(DbSessionMiddleware(container))
     dp.include_routers(
+        comments.router,  # ПЕРВЫМ: забирает все сообщения из групп обсуждения
         start.router,
         menu.router,  # кнопки меню — раньше онбординга: прерывают любой ввод
         onboarding.router,

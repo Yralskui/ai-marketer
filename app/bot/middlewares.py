@@ -49,6 +49,19 @@ class DbSessionMiddleware(BaseMiddleware):
         if tg_user is None:
             return None  # посты в канале, служебные обновления — игнорируем
 
+        if _is_group_update(event):
+            # Группа обсуждения канала: пишут подписчики, доступа к боту у них нет.
+            # Обрабатывает только роутер comments, ему нужна лишь сессия.
+            async with self.container.db.sessionmaker() as session:
+                data["session"] = session
+                try:
+                    result = await handler(event, data)
+                except Exception:
+                    await session.rollback()
+                    raise
+                await session.commit()
+                return result
+
         async with self.container.db.sessionmaker() as session:
             account = await resolve_account(
                 session,
@@ -75,6 +88,14 @@ class DbSessionMiddleware(BaseMiddleware):
                 raise
             await session.commit()
             return result
+
+
+def _is_group_update(event: TelegramObject) -> bool:
+    return (
+        isinstance(event, Update)
+        and event.message is not None
+        and event.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    )
 
 
 async def _deny(event: TelegramObject, user: TgUser) -> None:
