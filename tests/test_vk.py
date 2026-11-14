@@ -66,6 +66,8 @@ class FakeVK:
         self.next_id = 100
         # Режим «ключ сообщества»: ровно то, что ВК ответил на живом ключе (проверено 14.11.2026)
         self.restricted = False
+        # HTTP-статусы, которыми сервер загрузки ответит первыми (например, 405 как на живом ВК)
+        self.upload_statuses: list[int] = []
 
     def methods(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -78,6 +80,9 @@ class FakeVK:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if request.url.host == "upload.vk.test":
+            self.calls.append(("upload", {"path": request.url.path}))
+            if self.upload_statuses:
+                return httpx.Response(self.upload_statuses.pop(0), text="Not Allowed")
             return httpx.Response(200, json={"server": 5, "photo": '[{"x":1}]', "hash": "h"})
         method = request.url.path.rsplit("/", 1)[-1]
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
@@ -117,6 +122,10 @@ class FakeVK:
             return {"response": {"upload_url": "https://upload.vk.test/upload"}}
         if method == "photos.saveWallPhoto":
             return {"response": [{"id": 55, "owner_id": -GROUP}]}
+        if method == "photos.getMessagesUploadServer":
+            return {"response": {"album_id": -64, "upload_url": "https://upload.vk.test/messages"}}
+        if method == "photos.saveMessagesPhoto":
+            return {"response": [{"id": 77, "owner_id": -GROUP, "access_key": "abc"}]}
         if method == "wall.post":
             post_id, self.next_id = self.next_id, self.next_id + 1
             attachments = form.get("attachments", "")
@@ -275,7 +284,12 @@ async def test_publish_post_with_photo(publisher, vk, tmp_path):
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
     result = await publisher.publish(post(image_path=str(image)), channel())
-    assert vk.methods() == ["photos.getWallUploadServer", "photos.saveWallPhoto", "wall.post"]
+    assert vk.methods() == [
+        "photos.getWallUploadServer",
+        "upload",
+        "photos.saveWallPhoto",
+        "wall.post",
+    ]
     assert vk.params("photos.getWallUploadServer")["group_id"] == str(GROUP)
     assert vk.params("photos.saveWallPhoto")["hash"] == "h"
     assert vk.params("wall.post")["attachments"] == f"photo-{GROUP}_55"
@@ -297,13 +311,43 @@ async def test_unexpected_photo_error_stops_publication(publisher, vk, tmp_path)
     assert "wall.post" not in vk.methods()
 
 
-async def test_community_key_publishes_text_and_explains_missing_photo(publisher, vk, tmp_path):
-    """Живой ключ сообщества не грузит фото (27): текст выходит, человек получает пояснение."""
+async def test_community_key_uploads_photo_through_message_photos(publisher, vk, tmp_path):
+    """Живой ключ сообщества не грузит фото на стену (27), но принимает «фото сообщений», а ВК
+    принимает такое фото во вложении записи (проверено на живом ключе 14.11.2026)."""
     vk.restricted = True
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
     result = await publisher.publish(post(image_path=str(image)), channel())
-    assert result.external_id == "100" and result.url.endswith("_100")
+    assert result.note is None
+    assert vk.params("wall.post")["attachments"] == f"photo-{GROUP}_77_abc"
+    assert vk.methods() == [
+        "photos.getWallUploadServer",  # прямой путь закрыт (27)
+        "photos.getMessagesUploadServer",
+        "upload",
+        "photos.saveMessagesPhoto",
+        "wall.post",
+    ]
+    # следующий пост сразу идёт вторым путём: лишний отказ ВК не повторяем
+    await publisher.publish(post(id=8, image_path=str(image)), channel())
+    assert vk.methods().count("photos.getWallUploadServer") == 1
+
+
+async def test_upload_retries_with_a_fresh_address_after_405(publisher, vk, tmp_path):
+    """Сервер загрузки ВК иногда отвечает 405 — берём новый адрес и пробуем снова."""
+    vk.upload_statuses = [405]
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await publisher.publish(post(image_path=str(image)), channel())
+    assert result.note is None and vk.methods().count("photos.getWallUploadServer") == 2
+    assert vk.methods().count("upload") == 2
+
+
+async def test_text_goes_out_with_a_note_when_no_photo_path_works(publisher, vk, tmp_path):
+    vk.restricted = True
+    vk.fail["photos.getMessagesUploadServer"] = [ERROR_27]
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await publisher.publish(post(image_path=str(image)), channel())
     assert "без картинки" in result.note and "токен администратора" in result.note
     assert "attachments" not in vk.params("wall.post")
     assert vk.methods()[-1] == "wall.post"
@@ -416,7 +460,8 @@ async def test_check_channel_says_what_a_community_key_cannot_do(publisher, vk):
     vk.restricted = True
     check = await publisher.check_channel(channel())
     assert check.ok and "Ключ сообщества" in check.message
-    assert "картинки, правка записей и просмотры недоступны" in check.message
+    assert "публикация текста и картинок" in check.message
+    assert "правка записей и просмотры недоступны" in check.message
 
 
 @pytest.mark.parametrize(("state", "word"), [(3, "закрыта"), (0, "выключена")])
@@ -750,9 +795,9 @@ async def test_miniapp_vk_flow(settings, db, vk):
         assert state["profiles"][0]["vk_channel"] == ""
 
 
-async def test_miniapp_publish_with_community_key_explains_missing_picture(settings, db, vk):
-    """Ваш случай: ключ сообщества, пост с картинкой. Текст выходит, Mini App объясняет, почему
-    без картинки, а диагностика честно перечисляет, что ключ не умеет."""
+async def test_miniapp_publish_with_community_key_sends_picture(settings, db, vk):
+    """Ваш случай: ключ сообщества, пост с картинкой. Картинка выходит вместе с текстом, а
+    правка живой записи (закрыта ВК) даёт понятную ошибку."""
     vk.restricted = True
     settings.bot_token = BOT_TOKEN
     settings.miniapp_open_signup = True
@@ -803,9 +848,8 @@ async def test_miniapp_publish_with_community_key_explains_missing_picture(setti
             api + "post", headers=headers, json=body(company, copy, "publish")
         )
         assert response.status == 200, await response.text()
-        result = await response.json()
-        assert "без картинки" in result["note"]
-        assert vk.wall and "attachments" not in vk.params("wall.post")
+        assert "note" not in await response.json()  # всё вышло полностью
+        assert vk.wall and vk.params("wall.post")["attachments"] == f"photo-{GROUP}_77_abc"
 
         # правка живой записи недоступна ключу сообщества — понятная ошибка, текст не меняется
         history = (await (await client.get(api + "history", headers=headers)).json())["posts"]

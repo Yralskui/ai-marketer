@@ -78,6 +78,7 @@ class VKClient:
         self._sleep = sleep
         self._clock = clock
         self._pace_lock = asyncio.Lock()
+        self._wall_upload_forbidden = False  # ключ сообщества: прямой путь закрыт
         self._last_call = 0.0
 
     async def _wait(self, seconds: float) -> None:
@@ -138,31 +139,71 @@ class VKClient:
         await self._wait(delay)
 
     async def upload_wall_photo(self, group_id: int, path: Path) -> str:
-        """Загружает картинку для записи на стене сообщества и возвращает вложение `photo…`."""
-        server = await self.call(
-            "photos.getWallUploadServer", {"group_id": group_id}, idempotent=True
+        """Загружает картинку для записи сообщества и возвращает вложение `photo…`.
+
+        Токен администратора загружает фото обычным путём (`photos.getWallUploadServer`).
+        Ключ сообщества этот метод не пускает (ошибка 27), но разрешает «фото сообщений»:
+        такое фото принадлежит самому сообществу, и ВК принимает его во вложении записи
+        (проверено на живом ключе 14.11.2026). Если прямой путь закрыт, запоминаем это и
+        в следующий раз сразу идём вторым.
+        """
+        if not self._wall_upload_forbidden:
+            try:
+                return await self._upload(
+                    path,
+                    server_method="photos.getWallUploadServer",
+                    server_params={"group_id": group_id},
+                    save_method="photos.saveWallPhoto",
+                    save_params={"group_id": group_id},
+                )
+            except VKError as exc:
+                if exc.code not in (15, 27):
+                    raise
+                self._wall_upload_forbidden = True
+                log.info("VK: ключ не загружает фото на стену (%s); идём через фото сообщений", exc)
+        return await self._upload(
+            path,
+            server_method="photos.getMessagesUploadServer",
+            server_params={"peer_id": 0},
+            save_method="photos.saveMessagesPhoto",
+            save_params={},
         )
+
+    async def _upload(
+        self,
+        path: Path,
+        *,
+        server_method: str,
+        server_params: Mapping[str, Any],
+        save_method: str,
+        save_params: Mapping[str, Any],
+    ) -> str:
+        """Адрес загрузки → файл → сохранение. Ничего не публикует, поэтому повторы безопасны."""
         content = await asyncio.to_thread(path.read_bytes)
         mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
         uploaded: Any = None
-        for attempt in range(2):  # загрузка файла ничего не публикует — повтор безопасен
+        for attempt in range(3):
+            # Сервер загрузки иногда отвечает 405 — просим новый адрес и пробуем ещё раз
+            server = await self.call(server_method, server_params, idempotent=True)
             try:
                 response = await self._http.post(
                     server["upload_url"], files={"photo": (path.name, content, mime)}
                 )
                 response.raise_for_status()
                 uploaded = response.json()
-                break
-            except (httpx.HTTPError, ValueError) as exc:
-                if attempt:
-                    raise VKError(0, "не удалось загрузить картинку на сервер ВКонтакте") from exc
+                if isinstance(uploaded, dict) and uploaded.get("photo"):
+                    break
+                uploaded = None
+            except (httpx.HTTPError, ValueError):
+                uploaded = None
+            if attempt < 2:
                 await self._wait(1.0)
-        if not isinstance(uploaded, dict) or not uploaded.get("photo"):
-            raise VKError(0, "ВКонтакте не принял файл картинки")
+        if uploaded is None:
+            raise VKError(0, "не удалось загрузить картинку на сервер ВКонтакте")
         saved = await self.call(
-            "photos.saveWallPhoto",
+            save_method,
             {
-                "group_id": group_id,
+                **save_params,
                 "server": uploaded.get("server"),
                 "photo": uploaded["photo"],
                 "hash": uploaded.get("hash"),
@@ -170,7 +211,9 @@ class VKClient:
         )
         if not saved:
             raise VKError(0, "ВКонтакте не сохранил картинку")
-        return f"photo{saved[0]['owner_id']}_{saved[0]['id']}"
+        photo = saved[0]
+        key = f"_{photo['access_key']}" if photo.get("access_key") else ""
+        return f"photo{photo['owner_id']}_{photo['id']}{key}"
 
     async def close(self) -> None:
         await self._http.aclose()
