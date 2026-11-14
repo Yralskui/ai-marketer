@@ -160,11 +160,17 @@ async def main() -> None:
     models = KnowledgeModels(settings)
     await db.create_all()
     await storage.prepare()
+    # Без ключа OpenAI материалы не разбираем: пусть ждут в очереди, а не падают с ошибкой
+    can_process = bool(settings.llm_api_key)
+    if not can_process:
+        log.warning("LLM_API_KEY не задан: материалы останутся в очереди до появления ключа")
     try:
         while True:
             try:
-                async with db.sessionmaker() as session:
-                    document = await claim(session)
+                document = None
+                if can_process:
+                    async with db.sessionmaker() as session:
+                        document = await claim(session)
                 if document is not None:
                     await process(db, storage, models, document)
                 elif not await cleanup_one(db, storage):
