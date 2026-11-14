@@ -15,6 +15,7 @@ from app.llm.base import LLMProvider
 
 if TYPE_CHECKING:
     from app.services.notifier import Notifier
+    from app.services.object_storage import ObjectStorage
 
 
 @dataclass
@@ -36,6 +37,8 @@ class AgentContext:
     research_llm: LLMProvider | None = None
     web_context: str = ""
     progress: Callable[[str], None] | None = None
+    interactive_drafts: bool = False
+    storage: ObjectStorage | None = None
 
     def update_progress(self, stage: str) -> None:
         if self.progress is not None:

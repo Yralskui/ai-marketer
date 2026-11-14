@@ -135,11 +135,11 @@ class VKPublisher(Publisher):
         if (images or media) and not self.clients.business_account:
             note = (
                 "Пост вышел без картинки: для картинок во ВКонтакте нужен бизнес-аккаунт "
-                "(VK_IS_BUSINESS_ACCOUNT)."
+                "(IS_BUSINESS_ACCOUNT)."
             )
         elif images or media:
             if media and len(images) != len(media):
-                note = "Видео из черновика пропущено: адаптер ВКонтакте публикует только фото."
+                note = "Часть вложений пропущена: адаптер ВКонтакте публикует только фото."
             for image in images:
                 if not image.is_file():
                     raise PublishError("Файл изображения для ВКонтакте не найден.")

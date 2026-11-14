@@ -44,6 +44,9 @@ class MockLLMProvider(LLMProvider):
     ) -> LLMResponse:
         last_user = _last_content(messages, "user")
         current = last_user.rsplit("\n\nТекущий запрос:\n", 1)[-1]
+        follows_draft = bool(
+            "assistant: Черновик №" in last_user and current.casefold().startswith(REVISE_WORDS)
+        )
         if task == "classify_intent":
             call = _route(current)
             low = current.casefold()
@@ -55,7 +58,9 @@ class MockLLMProvider(LLMProvider):
                 "make_report": "report",
                 "list_posts": "list_posts",
             }.get(call[0] if call else "", "company")
-            if any(word in low for word in ("можно ли", "как подключить", "поддерживает")):
+            if follows_draft and (not call or call[0] == "revise_post"):
+                intent = "revise_post"
+            elif any(word in low for word in ("можно ли", "как подключить", "поддерживает")):
                 intent = "integration"
             elif low.startswith("как ") or "что уме" in low or "что это за проект" in low:
                 intent = "help"
@@ -67,6 +72,8 @@ class MockLLMProvider(LLMProvider):
         if task and task.startswith("args_"):
             call = _route(current)
             args = call[1] if call else {}
+            if task == "args_revise_post" and follows_draft and not args:
+                args = {"instruction": current}
             return LLMResponse(content=json.dumps(args, ensure_ascii=False))
         if task == "publish_intent":
             post = re.search(r"(?:пост|черновик)\s*[№#]?\s*(\d+)", current, re.I)

@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     image_provider: str = "mock"
     image_api_key: str = ""
     image_model: str = "gpt-image-2.5-flare"
-    image_timeout: float = 180.0
+    image_timeout: float = 60.0
 
     # --- Учёт расходов (цены в рублях; mock-провайдеры бесплатны) ---
     llm_price_input_per_1m: float = 15.0
@@ -85,13 +85,28 @@ class Settings(BaseSettings):
     # Ключи — секреты, хранятся только в .env; сообщество компании выбирается в Mini App.
     vk_communities: str = ""
     vk_api_version: str = "5.199"
+    vk_login: str = ""
+    vk_apikey: SecretStr = SecretStr("")
+    vk_password: SecretStr = SecretStr("")
     # Бизнес-аккаунт ВК с подтверждённым профилем и токеном администратора: картинки, правка
     # записей, просмотры. False — ключ сообщества: эти функции отключены, ошибок они не дают
-    vk_is_business_account: bool = False
+    vk_is_business_account: bool = Field(
+        False, validation_alias=AliasChoices("IS_BUSINESS_ACCOUNT", "vk_is_business_account")
+    )
 
     @property
     def vk_tokens(self) -> dict[int, str]:
-        return parse_vk_communities(self.vk_communities)
+        tokens = parse_vk_communities(self.vk_communities)
+        token = self.vk_apikey.get_secret_value() or self.vk_password.get_secret_value()
+        if token and self.vk_login:
+            address = self.vk_login.strip()
+            url = urlsplit(address if "://" in address else "https://" + address)
+            path = url.path.strip("/") if url.hostname in {"vk.ru", "vk.com"} else address
+            group = path.removeprefix("club").removeprefix("public").lstrip("-")
+            if not group.isascii() or not group.isdecimal() or int(group) <= 0:
+                raise ValueError("VK_LOGIN: укажите ID сообщества или ссылку vk.ru/club<ID>")
+            tokens[int(group)] = token
+        return tokens
 
     @field_validator("vk_communities")
     @classmethod

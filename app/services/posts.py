@@ -14,17 +14,20 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from enum import StrEnum
+from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.prompts import load_prompt, render_prompt
 from app.db.models import Business, EventType, Platform, Post, PostStatus
 from app.db.publications import PostAttachments, PostEditorialSettings
 from app.db.repositories import ChannelRepo, EventLogRepo, PostRepo
-from app.images import ImageGenerationError
+from app.images import ImageGenerationError, ImageGenerationTimeout
 from app.images.base import ImageProvider
 from app.llm.base import LLMError, LLMProvider
 from app.services.business_profile import profile_to_text
+from app.services.generated_gallery import available_bytes
 from app.services.post_history import RevisionSource, save_revision
 
 log = logging.getLogger(__name__)
@@ -153,13 +156,14 @@ async def create_draft(
     progress: Callable[[str], None] | None = None,
     style: PostStyle = PostStyle.NEUTRAL,
     image_direction: str = "",
+    reserve_caption: bool = False,
 ) -> Post:
     """Пишет текст (и картинку) через LLM и сохраняет пост в статусе draft.
 
     `image_path` — готовое фото клиента из фотобанка: тогда картинка не генерируется.
     """
     with_image = with_image or image_path is not None
-    limit = target_length(platform, with_image)
+    limit = target_length(platform, with_image or reserve_caption)
     system = render_prompt(
         "write_post",
         profile=profile_to_text(business),
@@ -184,6 +188,7 @@ async def create_draft(
 
     image_prompt = None
     image_source = "upload" if image_path else None
+    image_warning = None
     if image_path is None and with_image:
         if progress is not None:
             progress("image")
@@ -199,6 +204,9 @@ async def create_draft(
         if image_direction:
             image_prompt += "\nЗамысел кадра: " + image_direction[:500]
         try:
+            if not await available_bytes(session, business.id):
+                image_warning = "Галерея заполнена. Удалите изображение и повторите."
+                raise ImageGenerationError(image_warning)
             if images.name != "mock":
                 brief = await llm.complete(
                     render_prompt("image_brief"),
@@ -207,9 +215,19 @@ async def create_draft(
                 )
                 if brief.strip():
                     image_prompt += "\n\nОписание кадра:\n" + brief.strip()[:2500]
-            image_path = str(await images.generate(image_prompt))
+            generated = await images.generate(image_prompt)
+            await session.execute(
+                select(Business.id).where(Business.id == business.id).with_for_update()
+            )
+            if Path(generated).stat().st_size > await available_bytes(session, business.id):
+                Path(generated).unlink(missing_ok=True)
+                image_warning = "В галерее не хватило места для нового изображения."
+                raise ImageGenerationError(image_warning)
+            image_path = str(generated)
             image_source = "generated"
         except (ImageGenerationError, LLMError) as exc:
+            if isinstance(exc, ImageGenerationTimeout):
+                image_warning = str(exc)
             log.warning("Ошибка генерации изображения для компании #%s: %s", business.id, exc)
 
     channel = await ChannelRepo(session).get_active(business.id, platform)
@@ -223,6 +241,7 @@ async def create_draft(
         status=PostStatus.DRAFT,
         plan_item_id=plan_item_id,
     )
+    post.image_warning = image_warning
     repo = PostRepo(session)
     await repo.add(post)
     if style != PostStyle.NEUTRAL:
@@ -288,6 +307,7 @@ async def revise(
     source: RevisionSource | None = None,
     web_context: str = "",
     style: PostStyle | None = None,
+    reserve_caption: bool = False,
 ) -> Post:
     """Переписывает текст по правке клиента. Пост возвращается в draft."""
     if post.status != PostStatus.DRAFT:
@@ -296,7 +316,9 @@ async def revise(
 
     platform = Platform(post.platform)
     album = await session.get(PostAttachments, post.id)
-    limit = target_length(platform, bool(post.image_path or (album and album.items)))
+    limit = target_length(
+        platform, bool(reserve_caption or post.image_path or (album and album.items))
+    )
     chosen_style = style if style is not None else await post_style(session, post.id)
     system = render_prompt("revise_post", profile=profile_to_text(business), limit=limit)
     system += style_instructions(chosen_style)

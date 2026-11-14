@@ -27,9 +27,15 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, text, update
 
 from app.agent.context import AgentContext
-from app.agent.harness import answer
+from app.agent.harness import active_draft_options, answer, choose_draft_option
 from app.config import IMAGES_DIR
-from app.db.knowledge import MiniUserState, PendingPostAction, ProfileDocument
+from app.db.knowledge import (
+    HiddenGeneratedImage,
+    MiniUserState,
+    PendingPostAction,
+    PendingProfileAttachment,
+    ProfileDocument,
+)
 from app.db.models import (
     AgentMessage,
     Business,
@@ -88,8 +94,10 @@ from app.services import (
     approval,
     business_profile,
     comments,
+    company_attachments,
     content_plan,
     editorial,
+    generated_gallery,
     media,
     posts,
     reports,
@@ -143,13 +151,15 @@ class MiniApp:
         self.active_uploads = 0
         self.channel_labels: dict[str, tuple[float, str]] = {}
         self.chat_progress: dict[tuple[int, int, UUID], str] = {}
+        self.chat_jobs: set[asyncio.Task] = set()
+        self.chat_results: dict[tuple[int, int, UUID], dict] = {}
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/miniapp", self.asset)
         app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
         app.router.add_route(
             "*",
-            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|chat-progress|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|critique|attachment|channel-status}",
+            "/miniapp/api/{action:state|profiles|select|profile|document|generated|post|plan|chat|chat-progress|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|critique|attachment|channel-status}",
             self.api,
         )
 
@@ -192,6 +202,8 @@ class MiniApp:
             ("document", "POST"),
             ("document", "PATCH"),
             ("document", "GET"),
+            ("generated", "GET"),
+            ("generated", "DELETE"),
             ("website", "POST"),
             ("post", "POST"),
             ("post", "PUT"),
@@ -268,7 +280,10 @@ class MiniApp:
                     if company_id not in allowed:
                         return json_response({"error": "Профиль недоступен"}, 404)
                     key = (user.id, company_id, UUID(request.query["id"]))
-                    return json_response({"stage": self.chat_progress.get(key)})
+                    progress = {"stage": self.chat_progress.get(key)}
+                    if key in self.chat_results:
+                        progress["result"] = self.chat_results[key]
+                    return json_response(progress)
                 if action == "channel-status":
                     company = allowed.get(int(request.query.get("company", 0)))
                     if company is None:
@@ -282,6 +297,14 @@ class MiniApp:
                     return await self.document_preview(
                         session, company.id, int(request.query["id"])
                     )
+                if action == "generated" and method == "GET":
+                    company = allowed.get(int(request.query["company"]))
+                    if company is None or company.owner_id != user.id:
+                        return json_response({"error": "Изображение недоступно"}, 404)
+                    for image_id, path, _ in await generated_gallery.entries(session, company.id):
+                        if image_id == int(request.query["id"]):
+                            return web.FileResponse(path, headers=SECURITY)
+                    return json_response({"error": "Изображение недоступно"}, 404)
                 if action in {
                     "report",
                     "history",
@@ -407,7 +430,10 @@ class MiniApp:
                     company = allowed.get(data.get("company"))
                     if company is None:
                         return json_response({"error": "Профиль недоступен"}, 404)
-                    if action in {"profile", "document", "website"} and company.owner_id != user.id:
+                    if (
+                        action in {"profile", "document", "generated", "website"}
+                        and company.owner_id != user.id
+                    ):
                         return json_response({"error": "Изменять профиль может владелец"}, 403)
                     if action == "website":
                         return await self.import_website(session, company, data)
@@ -445,6 +471,16 @@ class MiniApp:
                         )
                         if selection.selected_id == company.id:
                             selection.selected_id = default.id if default else None
+                    elif action == "generated":
+                        image_id = int(data["id"])
+                        await session.execute(
+                            select(Business.id).where(Business.id == company.id).with_for_update()
+                        )
+                        if any(
+                            entry[0] == image_id
+                            for entry in await generated_gallery.entries(session, company.id)
+                        ):
+                            session.add(HiddenGeneratedImage(revision_id=image_id))
                     elif action == "document":
                         doc = await session.scalar(
                             select(ProfileDocument)
@@ -516,7 +552,19 @@ class MiniApp:
                         async with usage_scope(session, company.id):
                             if action == "chat":
                                 message = str(data.get("text", "")).strip()
-                                if not 0 < len(message) <= 4000:
+                                option = data.get("draft_option")
+                                if option is not None:
+                                    if (
+                                        not isinstance(option, dict)
+                                        or not re.fullmatch(
+                                            r"[0-9a-f]{12}", str(option.get("token", ""))
+                                        )
+                                        or not re.fullmatch(
+                                            r"[a-z_]{1,12}", str(option.get("choice", ""))
+                                        )
+                                    ):
+                                        raise ValueError("Неверный вариант черновика")
+                                elif not 0 < len(message) <= 4000:
                                     raise ValueError("Сообщение должно быть от 1 до 4000 символов")
                                 return await self.chat(session, user, company, message, data)
                             outcome = await self.post_action(session, user, company, data)
@@ -543,29 +591,77 @@ class MiniApp:
     async def chat(self, session, user, company, message, data) -> web.Response:
         request_id = UUID(str(data["id"])) if "id" in data else uuid4()
         key = (user.id, company.id, request_id)
-        if key in self.chat_progress:
+        option = data.get("draft_option")
+        if key in self.chat_progress or key in self.chat_results:
             return json_response({"error": "Запрос уже выполняется"}, 409)
+        if data.get("background") is True:
+            if any(running[:2] == key[:2] for running in self.chat_progress):
+                return json_response({"error": "Дождитесь ответа на предыдущее сообщение."}, 409)
+            self.chat_progress[key] = "thinking"
+            job = asyncio.create_task(self.run_chat_job(key, message, option))
+            self.chat_jobs.add(job)
+            job.add_done_callback(self.chat_jobs.discard)
+            return json_response({"accepted": True}, 202)
         self.chat_progress[key] = "thinking"
+        try:
+            return json_response(
+                await self.chat_reply(session, user, company, message, key, option)
+            )
+        finally:
+            self.chat_progress.pop(key, None)
 
+    async def run_chat_job(self, key, message, option):
+        try:
+            async with self.container.db.sessionmaker() as session:
+                user = await session.get(User, key[0])
+                company = await session.get(Business, key[1])
+                if user is None or company is None:
+                    raise ValueError("Профиль недоступен.")
+                async with usage_scope(session, company.id):
+                    result = await self.chat_reply(session, user, company, message, key, option)
+        except (BudgetExceededError, ValueError) as exc:
+            result = {"error": str(exc)}
+        except LLMError:
+            log.warning(
+                "Чат: сбой модели для профиля %s на этапе %s", key[1], self.chat_progress.get(key)
+            )
+            result = {"error": "ИИ или поиск временно недоступен. Попробуйте ещё раз."}
+        except Exception:
+            log.exception("Ошибка фонового запроса чата для профиля %s", key[1])
+            result = {"error": "Операция не завершилась. Проверьте черновики перед повтором."}
+        finally:
+            self.chat_progress.pop(key, None)
+        self.chat_results[key] = result
+        asyncio.get_running_loop().call_later(600, self.chat_results.pop, key, None)
+
+    def agent_context(self, session, user, company, progress=None):
+        return AgentContext(
+            session,
+            user,
+            company,
+            self.container.settings,
+            self.container.llm,
+            self.container.images,
+            research_llm=self.container.research_llm,
+            progress=progress,
+            interactive_drafts=True,
+            storage=self.container.storage,
+        )
+
+    async def chat_reply(self, session, user, company, message, key, option) -> dict:
         def progress(stage: str) -> None:
             self.chat_progress[key] = stage
 
-        try:
-            ctx = AgentContext(
-                session,
-                user,
-                company,
-                self.container.settings,
-                self.container.llm,
-                self.container.images,
-                research_llm=self.container.research_llm,
-                progress=progress,
-            )
-            reply = await answer(ctx, message)
-            await session.commit()
-            return json_response(reply)
-        finally:
-            self.chat_progress.pop(key, None)
+        ctx = self.agent_context(session, user, company, progress)
+        reply = (
+            await choose_draft_option(ctx, option["token"], option["choice"])
+            if option
+            else await answer(ctx, message)
+        )
+        if not reply.get("text", "").strip():
+            raise LLMError("Пустой ответ чата")
+        await session.commit()
+        return reply
 
     async def ensure_default_profile(self, session, user, selection) -> Business:
         repo = BusinessRepo(session)
@@ -1350,6 +1446,8 @@ class MiniApp:
         items = []
         chat_posts = []
         materials = []
+        generated = []
+        pending_files = {}
         plans = []
         proposal = None
         management = None
@@ -1358,6 +1456,42 @@ class MiniApp:
             dashboard = await self.dashboard(session, active.id)
             if active.owner_id == user.id:
                 management = await self.management_state(session, active)
+                generated = [
+                    {
+                        "id": image_id,
+                        "name": f"Изображение №{image_id}",
+                        "size": size,
+                        "preview": size <= DOCUMENT_PREVIEW_MAX_BYTES,
+                    }
+                    for image_id, _, size in await generated_gallery.entries(session, active.id)
+                ]
+                pending_files = {
+                    item.post_id: {"name": filename, "id": item.document_id}
+                    for item, filename, updated_at in await session.execute(
+                        select(PendingProfileAttachment, ProfileDocument.filename, Post.updated_at)
+                        .join(
+                            ProfileDocument,
+                            ProfileDocument.id == PendingProfileAttachment.document_id,
+                        )
+                        .join(Post, Post.id == PendingProfileAttachment.post_id)
+                        .where(
+                            Post.business_id == active.id,
+                            Post.status.in_(
+                                [
+                                    PostStatus.DRAFT,
+                                    PostStatus.PENDING_APPROVAL,
+                                    PostStatus.FAILED,
+                                    PostStatus.APPROVED,
+                                    PostStatus.SCHEDULED,
+                                ]
+                            ),
+                            ProfileDocument.business_id == active.id,
+                            ProfileDocument.status != "deleted",
+                            PendingProfileAttachment.user_id == user.id,
+                        )
+                    )
+                    if item.version == updated_at.isoformat()
+                }
             pending = await session.get(PendingPostAction, (user.id, active.id))
             if pending is not None:
                 post = await PostRepo(session).get_for_business(pending.proposal["id"], active.id)
@@ -1487,6 +1621,13 @@ class MiniApp:
                 "history": history,
                 "chat_posts": chat_posts,
                 "documents": materials,
+                "generated": generated,
+                "pending_files": pending_files,
+                "draft_question": await active_draft_options(
+                    self.agent_context(session, user, active)
+                )
+                if active
+                else None,
                 "document_bytes_available": await remaining_bytes(session, active.id)
                 if active
                 else None,
@@ -1752,7 +1893,29 @@ class MiniApp:
             await session.refresh(post)
             if post.updated_at.isoformat() != version:
                 raise approval.PostChangedError
-            if action == "copy_to_vk":
+            if action in {"attach_company_file", "decline_company_file"}:
+                pending = await session.get(PendingProfileAttachment, post.id, with_for_update=True)
+                if (
+                    company.owner_id != user.id
+                    or pending is None
+                    or pending.user_id != user.id
+                    or pending.document_id != data.get("document")
+                ):
+                    raise ValueError("Запрос на вложение недоступен")
+                if action == "attach_company_file":
+                    if pending.version != version:
+                        raise approval.PostChangedError
+                    await company_attachments.attach_company_file(
+                        session,
+                        company,
+                        post,
+                        pending,
+                        storage=self.container.storage,
+                        business_account=self.container.settings.vk_is_business_account,
+                    )
+                else:
+                    await session.delete(pending)
+            elif action == "copy_to_vk":
                 if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
                     raise ValueError("Сначала подключите сообщество ВКонтакте")
                 copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)
@@ -1880,6 +2043,12 @@ class MiniApp:
                             raise ValueError("Вложение недоступно")
                 has_media = bool(new_items) if new_items is not None else bool(post.image_path)
                 platform = Platform(post.platform)
+                if (
+                    new_items
+                    and any(item["type"] == "document" for item in new_items)
+                    and any(item["type"] != "document" for item in new_items)
+                ):
+                    raise ValueError("Telegram принимает PDF и фотографии в отдельных публикациях")
                 hard_limit = posts.PLATFORM_HARD_LIMITS[platform]
                 limit = (
                     posts.TELEGRAM_CAPTION_LIMIT

@@ -23,6 +23,7 @@ class CreatePostArgs(BaseModel):
     with_image: bool = Field(False, description="Нужна ли картинка к посту")
     style: posts.PostStyle = Field(posts.PostStyle.NEUTRAL, description="Стиль поста")
     image_direction: str = Field("", max_length=500, description="Конкретный замысел иллюстрации")
+    profile_file_id: int | None = Field(None, gt=0, description="ID выбранного файла компании")
 
 
 @tool(
@@ -40,8 +41,10 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         if args.platform == "both"
         else [Platform(args.platform or "telegram")]
     )
-    with_image = args.with_image and (
-        targets[0] != Platform.VK or ctx.settings.vk_is_business_account
+    with_image = (
+        args.with_image
+        and args.profile_file_id is None
+        and (targets[0] != Platform.VK or ctx.settings.vk_is_business_account)
     )
     post = await posts.create_draft(
         ctx.session,
@@ -58,6 +61,7 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         progress=ctx.update_progress,
         style=args.style,
         image_direction=args.image_direction,
+        reserve_caption=args.profile_file_id is not None,
     )
     created = [post]
     if len(targets) > 1:
@@ -73,10 +77,13 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         "has_image": bool(post.image_path),
         "preview": post.text[:200],
     }
-    if args.with_image and not with_image:
+    if args.with_image and not with_image and args.profile_file_id is None:
         result["warning"] = "С текущим ключом ВКонтакте пост будет текстовым."
     elif with_image and not post.image_path:
-        result["warning"] = "Картинку не удалось сгенерировать. Черновик отправлен без неё."
+        result["warning"] = (
+            getattr(post, "image_warning", None)
+            or "Картинку не удалось сгенерировать. Черновик отправлен без неё."
+        )
     if len(created) > 1:
         result["post_ids"] = [item.id for item in created]
     return result
@@ -93,9 +100,11 @@ async def sole_or_default_platform(ctx: AgentContext) -> str | None:
 
 
 class RevisePostArgs(BaseModel):
-    post_id: int = Field(description="Номер поста")
+    post_id: int | None = Field(None, gt=0, description="Номер поста, если его можно определить")
     instruction: str = Field(description="Что изменить, словами клиента", min_length=2)
     style: posts.PostStyle | None = Field(None, description="Новый стиль при явной просьбе")
+    profile_file_id: int | None = Field(None, gt=0, description="ID выбранного файла компании")
+    attachment_only: bool = Field(False, description="Клиент просит только добавить этот файл")
     research_question: str = Field(
         "",
         max_length=400,
@@ -108,6 +117,8 @@ class RevisePostArgs(BaseModel):
     "Переписать существующий пост по правке клиента и снова отправить на согласование.",
 )
 async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
+    if args.post_id is None:
+        return {"error": "Укажите номер поста."}
     post = await PostRepo(ctx.session).get_for_business(args.post_id, ctx.business_id)
     if post is None:
         return {"error": f"Пост #{args.post_id} не найден"}
@@ -119,6 +130,7 @@ async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
         args.instruction,
         web_context=ctx.web_context,
         style=args.style,
+        reserve_caption=args.profile_file_id is not None,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)

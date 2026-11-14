@@ -56,3 +56,29 @@ class PendingPostAction(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
     business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), primary_key=True)
     proposal: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class PendingProfileAttachment(Base):
+    __tablename__ = "pending_profile_attachments"
+
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("profile_documents.id"))
+    request_id: Mapped[int | None] = mapped_column(ForeignKey("agent_messages.id"))
+    version: Mapped[str] = mapped_column(String(40))
+
+
+class HiddenGeneratedImage(Base):
+    __tablename__ = "hidden_generated_images"
+
+    revision_id: Mapped[int] = mapped_column(ForeignKey("post_revisions.id"), primary_key=True)
+
+
+class PendingDraftOptions(TimestampMixin, Base):
+    __tablename__ = "pending_draft_options"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), primary_key=True)
+    token: Mapped[str] = mapped_column(String(16))
+    stage: Mapped[str] = mapped_column(String(12))
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
