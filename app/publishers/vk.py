@@ -20,7 +20,6 @@ from typing import Any
 from app.db.models import Channel, Platform, Post
 from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
 from app.publishers.vk_api import VKClients, VKError
-from app.services import public_posts
 from app.services.posts import PLATFORM_HARD_LIMITS
 
 log = logging.getLogger(__name__)
@@ -88,20 +87,8 @@ def _community(info: dict[str, Any]) -> VKCommunity:
 class VKPublisher(Publisher):
     platform = Platform.VK
 
-    def __init__(
-        self,
-        clients: VKClients | None = None,
-        *,
-        public_url: str = "",
-        secret: str = "",
-        card_in_text: bool = False,
-    ) -> None:
+    def __init__(self, clients: VKClients | None = None) -> None:
         self.clients = clients or VKClients({})
-        # Адрес сайта и секрет для карточек-ссылок: без них картинку без токена админа не показать
-        self.public_url = public_url
-        self.secret = secret
-        # Ссылка на страницу поста в тексте записи (вместо картинки); по умолчанию выключено
-        self.card_in_text = card_in_text
 
     # ------------------------------------------------------------------ подключение
 
@@ -130,12 +117,6 @@ class VKPublisher(Publisher):
 
     # ------------------------------------------------------------------ публикация
 
-    def _card_link(self, post: Post) -> str | None:
-        """Ссылка на публичную страницу поста — из неё ВК делает карточку с картинкой."""
-        if not (self.public_url and self.secret):
-            return None
-        return f"{self.public_url.rstrip('/')}/p/{public_posts.make_token(self.secret, post.id)}"
-
     async def publish(self, post: Post, channel: Channel) -> PublishResult:
         group_id = group_id_of(channel)
         try:
@@ -145,7 +126,6 @@ class VKPublisher(Publisher):
         text = post.text[: PLATFORM_HARD_LIMITS[Platform.VK]]
         attachments: list[str] = []
         note: str | None = None
-        link_in_text: str | None = None
         if post.image_path:
             image = Path(post.image_path)
             if not image.exists():
@@ -158,21 +138,15 @@ class VKPublisher(Publisher):
                         raise PublishError(
                             f"ВКонтакте: не удалось загрузить картинку — {exc}"
                         ) from exc
-                    # Ключ сообщества не загружает фото (проверено на живом ключе). Вложение-
-                    # ссылку ВК тоже отвергает: «No photo given», а «фото сообщений» молча
-                    # выбрасывает. Остаётся ссылка в тексте — по включённому card_in_text.
-                    card = self._card_link(post) if self.card_in_text else None
-                    if card is not None:
-                        link_in_text = card
-                    else:
-                        log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
-                        note = (
-                            "Пост вышел без картинки: ВКонтакте не принял загрузку фото ключом "
-                            "сообщества. Для картинок может понадобиться токен администратора."
-                        )
-        if link_in_text:
-            limit = PLATFORM_HARD_LIMITS[Platform.VK] - len(link_in_text) - 2
-            text = text[:limit] + "\n\n" + link_in_text
+                    # Ключ сообщества не загружает фото. Обходные пути ВК тоже закрыл (проверено
+                    # на живом ключе 14.11.2026): «фото сообщений» молча выбрасывается из записи,
+                    # вложение-ссылка отвергается («No photo given»), ссылка в тексте остаётся
+                    # обычной ссылкой. Остаётся текст и объяснение человеку.
+                    log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
+                    note = (
+                        "Пост вышел без картинки: ВКонтакте не разрешает ключу сообщества "
+                        "загружать фото. Для картинок нужен токен администратора."
+                    )
         try:
             response = await client.call(
                 "wall.post",
@@ -266,8 +240,8 @@ class VKPublisher(Publisher):
             return ChannelCheck(True, message + ". Токен администратора: доступны все функции")
         return ChannelCheck(
             True,
-            message + ". Ключ сообщества: публикация текста, картинки карточкой со ссылкой, "
-            "подписчики; правка записей и просмотры недоступны (ограничение ВКонтакте)",
+            message + ". Ключ сообщества: публикация текста и подписчики; картинки, правка "
+            "записей и просмотры недоступны (ограничение ВКонтакте)",
         )
 
 

@@ -24,7 +24,7 @@ from app.publishers.base import Publisher, PublishError
 from app.publishers.vk import VKPublisher, group_id_of, parse_community
 from app.publishers.vk_analytics import VKAnalytics
 from app.publishers.vk_api import VKClient, VKClients, VKError
-from app.services import posts, public_posts, social_metrics, vk_channel
+from app.services import posts, social_metrics, vk_channel
 from app.services.publishing import PublishingService
 from app.utils.time import utcnow
 from app.web.miniapp import MiniApp
@@ -309,58 +309,27 @@ async def test_unexpected_photo_error_stops_publication(publisher, vk, tmp_path)
     assert "wall.post" not in vk.methods()
 
 
-@pytest.fixture
-def card_publisher(clients) -> VKPublisher:
-    """Публикатор со ссылкой на страницу поста в тексте (включается флагом card_in_text)."""
-    return VKPublisher(
-        clients, public_url="https://nexussub.test", secret="test-secret", card_in_text=True
-    )
-
-
-async def test_community_key_can_put_a_post_link_into_the_text(card_publisher, vk, tmp_path):
-    """Ключ сообщества не грузит фото (27); вложение-ссылку ВК отвергает («No photo given»), а
-    «фото сообщений» молча выбрасывает. Остаётся ссылка в тексте — только по флагу."""
+async def test_community_key_cannot_show_a_picture_and_says_so(publisher, vk, tmp_path):
+    """Живой ключ сообщества (14.11.2026): фото на стену — 27; «фото сообщений» ВК молча
+    выбрасывает; вложение-ссылку отвергает; ссылка в тексте остаётся ссылкой. Значит, текст
+    выходит как есть, без «обходных» вложений, а человеку объясняют, почему нет картинки."""
     vk.restricted = True
-    image = tmp_path / "card.png"
-    Image.new("RGB", (8, 8)).save(image)
-    result = await card_publisher.publish(post(image_path=str(image)), channel())
-    sent = vk.params("wall.post")
-    link = f"https://nexussub.test/p/{public_posts.make_token('test-secret', 7)}"
-    assert sent["message"] == f"Привет, ВК!\n\n{link}"
-    assert "attachments" not in sent  # ссылку во вложение не кладём
-    assert result.note is None
-    assert vk.methods() == ["photos.getWallUploadServer", "wall.post"]
-    # следующий пост не тратит лишний запрос на заведомый отказ
-    await card_publisher.publish(post(id=8, image_path=str(image)), channel())
-    assert vk.methods().count("photos.getWallUploadServer") == 1
-
-
-async def test_link_in_text_respects_the_vk_limit(card_publisher, vk, tmp_path):
-    vk.restricted = True
-    image = tmp_path / "card.png"
-    Image.new("RGB", (8, 8)).save(image)
-    await card_publisher.publish(post(text="а" * 20_000, image_path=str(image)), channel())
-    message = vk.params("wall.post")["message"]
-    assert len(message) <= 15_000 and message.rstrip().endswith(
-        public_posts.make_token("test-secret", 7)
-    )
-
-
-async def test_by_default_there_is_no_link_in_the_text(clients, vk, tmp_path):
-    """Без флага ссылка в текст не попадает: текст выходит без картинки, с пояснением."""
-    vk.restricted = True
-    publisher = VKPublisher(clients, public_url="https://nexussub.test", secret="test-secret")
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
     result = await publisher.publish(post(image_path=str(image)), channel())
-    assert vk.params("wall.post")["message"] == "Привет, ВК!"
-    assert "без картинки" in result.note
+    sent = vk.params("wall.post")
+    assert sent["message"] == "Привет, ВК!" and "attachments" not in sent
+    assert "без картинки" in result.note and "токен администратора" in result.note
+    assert vk.methods() == ["photos.getWallUploadServer", "wall.post"]
+    # следующий пост не тратит лишний запрос на заведомый отказ
+    await publisher.publish(post(id=8, image_path=str(image)), channel())
+    assert vk.methods().count("photos.getWallUploadServer") == 1
 
 
-async def test_user_token_still_uses_native_photos(card_publisher, vk, tmp_path):
+async def test_user_token_uses_native_photos(publisher, vk, tmp_path):
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
-    await card_publisher.publish(post(image_path=str(image)), channel())
+    await publisher.publish(post(image_path=str(image)), channel())
     assert vk.params("wall.post")["attachments"] == f"photo-{GROUP}_55"  # настоящее фото
 
 
@@ -492,7 +461,7 @@ async def test_check_channel_says_what_a_community_key_cannot_do(publisher, vk):
     vk.restricted = True
     check = await publisher.check_channel(channel())
     assert check.ok and "Ключ сообщества" in check.message
-    assert "картинки карточкой со ссылкой" in check.message
+    assert "картинки, правка записей и просмотры недоступны" in check.message
     assert "правка записей и просмотры недоступны" in check.message
 
 
@@ -838,9 +807,7 @@ async def test_miniapp_publish_with_community_key_explains_missing_picture(setti
     await container.db.dispose()
     container.db = db
     container.publishing.publishers[Platform.VK] = VKPublisher(
-        VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep),
-        public_url="https://nexussub.test",
-        secret=BOT_TOKEN,
+        VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep)
     )
     app = web.Application()
     MiniApp(container).register(app)

@@ -59,9 +59,7 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
     # ВКонтакте не зависит от бота: публикация и метрики работают, как только заданы ключи
     vk_clients = VKClients(settings.vk_tokens, version=settings.vk_api_version)
     publishers: dict[Platform, Publisher] = {
-        Platform.VK: VKPublisher(
-            vk_clients, public_url=settings.miniapp_public_url, secret=settings.bot_token
-        ),
+        Platform.VK: VKPublisher(vk_clients),
         Platform.MAX: MaxPublisher(),
     }
     analytics_sources: dict[Platform, AnalyticsSource] = {}
