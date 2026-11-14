@@ -224,6 +224,12 @@ async def test_end_to_end_bot_flow(settings):
     await dp.feed_update(bot, msg(OWNER_ID, "Напиши пост про витрины"))
     assert "Для какой компании" in fake.sent_texts(OWNER_ID)[-1]
     await dp.feed_update(bot, msg(OWNER_ID, "Студия стекла"))
+    # перед черновиком бот уточняет стиль и картинку кнопками
+    for expected, choice in (("В каком стиле", "neutral"), ("Добавить картинку", "none")):
+        assert expected in fake.sent_texts(OWNER_ID)[-1]
+        data = fake.requests[-1].reply_markup.inline_keyboard[0][0].callback_data
+        prefix = data.rsplit(":", 1)[0]
+        await dp.feed_update(bot, press_data(OWNER_ID, f"{prefix}:{choice}"))
     assert "ждёт согласования" in fake.sent_texts(OWNER_ID)[-1]
     async with container.db.sessionmaker() as session:
         (post,) = await PostRepo(session).list_for_business(business_id)

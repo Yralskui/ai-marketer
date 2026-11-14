@@ -777,22 +777,6 @@ function draftActions(post, options = {}) {
     actions.append(button("Отклонить",() => decide("reject"),"plain"),
         button("Редактировать",() => editPost(post,options.refresh),"plain"),
         button("Принять",() => decide("approve"),"primary"));
-    const pending = state.pending_files?.[post.id];
-    if (pending) {
-        const card = el("div",undefined,"company-file-confirm");
-        const decisions = el("div",undefined,"row");
-        const decideFile = async action => {
-            await api("post","POST",{company,id:post.id,version:post.version,action,document:pending.id});
-            await load();
-            if (options.refresh) options.refresh();
-        };
-        decisions.append(
-            button("Без файла",() => decideFile("decline_company_file"),"plain"),
-            button("Прикрепить",() => decideFile("attach_company_file"),"primary"),
-        );
-        card.append(el("p","Прикрепить «" + pending.name + "»?"),decisions);
-        actions.prepend(card);
-    }
     if (scheduled) {
         const hint = el("p","Публикация · " + historyTime(when),"draft-schedule-hint");
         actions.prepend(hint);
@@ -1503,8 +1487,12 @@ const fileExtension = name => name.includes(".") ? name.split(".").at(-1).toLowe
 const fileSymbols = {
     image:"M3 3h18v18H3z M8 9h.01 M3 17l5-5 4 4 3-3 6 6",
     pdf:"M6 3h8l4 4v14H6z M14 3v5h4 M8 15h8",
+    doc:"M6 3h8l4 4v14H6z M14 3v5h4 M8 11l1.5 7 2.5-5 2.5 5 1.5-7",
     text:"M6 3h8l4 4v14H6z M14 3v5h4 M8 12h8 M8 15h8 M8 18h5",
+    md:"M4 6h16v12H4z M7 15V9l2.5 3L12 9v6 M15 12l2 2.5 2-2.5 M17 9.5v5",
 };
+const fileKinds = {pdf:"pdf", docx:"doc", doc:"doc", md:"md", txt:"text"};
+const fileKindLabels = {pdf:"PDF", doc:"DOCX", md:"MD", text:"TXT"};
 const documentPreviews = new Map();
 const confirmFile = document.querySelector("#confirm-file");
 
@@ -1520,11 +1508,11 @@ function fileTile(item, company, remove, sourceType = "document") {
     const tile = el("figure",undefined,"profile-file");
     const square = el("div",undefined,"profile-file-square");
     const suffix = fileExtension(item.name);
-    const isImage = sourceType === "generated" || profileImageExtensions.has(suffix);
-    const kind = isImage ? "image" : suffix === "pdf" ? "pdf" : "text";
+    const isImage = sourceType === "content" || profileImageExtensions.has(suffix);
+    const kind = isImage ? "image" : fileKinds[suffix] || "text";
     square.dataset.kind = kind;
     square.append(chatIcon(fileSymbols[kind]));
-    if (kind !== "image") square.append(el("span",suffix.toUpperCase()));
+    if (kind !== "image") square.append(el("span",fileKindLabels[kind] || suffix.toUpperCase()));
     const close = button("",remove,"profile-file-remove");
     close.setAttribute("aria-label","Удалить " + item.name);
     close.append(chatIcon("M6 6l12 12M18 6L6 18"));
@@ -1662,23 +1650,53 @@ function profileForm(company) {
     const add = button("Добавить файлы +",() => picker.click(),"profile-add-files");
     form.append(el("h3","Файлы профиля"),el("p","PDF, Word, TXT, MD и до " + profileImageLimit + " картинок · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
     if (company) {
-        const generated = el("div",undefined,"profile-files");
-        const empty = el("p","Здесь будут изображения, которые ассистент сгенерирует для постов.","muted");
-        for (const item of state.generated || []) {
+        const content = el("div",undefined,"profile-files");
+        const empty = el("p","Здесь будут картинки, которые ассистент создал для постов, и те, что вы добавите сами. Только их ассистент может использовать в постах.","muted");
+        const contentError = el("p",undefined,"sheet-error");
+        contentError.setAttribute("role","alert");
+        contentError.hidden = true;
+        const addContentTile = item => {
             const tile = fileTile(item,savedCompany,async () => {
                 if (!await confirmDocumentRemoval(item.name)) return;
-                await api("generated","DELETE",{company:savedCompany,id:item.id});
-                state.generated = (state.generated || []).filter(entry => entry.id !== item.id);
-                const key = "generated:" + savedCompany + ":" + item.id;
+                await api("content","DELETE",{company:savedCompany,id:item.id});
+                state.content = (state.content || []).filter(entry => entry.id !== item.id);
+                const key = "content:" + savedCompany + ":" + item.id;
                 documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
                 documentPreviews.delete(key);
                 tile.remove();
-                empty.hidden = Boolean(generated.childElementCount);
-            },"generated");
-            generated.append(tile);
-        }
-        empty.hidden = Boolean(generated.childElementCount);
-        form.append(el("h3","Сгенерированный контент"),el("p","До 100 МБ","muted"),generated,empty);
+                empty.hidden = Boolean(content.childElementCount);
+            },"content");
+            content.append(tile);
+        };
+        for (const item of state.content || []) addContentTile(item);
+        empty.hidden = Boolean(content.childElementCount);
+        const contentPicker = el("input");
+        contentPicker.type = "file";
+        contentPicker.multiple = true;
+        contentPicker.hidden = true;
+        contentPicker.accept = ["image/*",...[...profileImageExtensions].map(suffix => "." + suffix)].join(",");
+        contentPicker.addEventListener("change",async () => {
+            const files = [...contentPicker.files];
+            contentPicker.value = "";
+            if (!files.length) return;
+            if (files.some(file => !profileImageExtensions.has(fileExtension(file.name)))) {
+                contentError.textContent = "В раздел «Контент» добавляются только изображения.";
+                contentError.hidden = false;
+                return;
+            }
+            contentError.hidden = true;
+            try {
+                for (const file of files) await api("content?company=" + savedCompany,"PUT",file);
+                await load();
+                sheet.close();
+                profileForm(state.profiles.find(item => item.id === savedCompany));
+            } catch (error) {
+                contentError.textContent = error.message;
+                contentError.hidden = false;
+            }
+        });
+        form.append(el("h3","Контент"),el("p","Только изображения · до 100 МБ","muted"),content,empty,contentPicker,
+            button("Добавить картинки +",() => contentPicker.click(),"profile-add-files"),contentError);
     }
     const submit = el("button","Сохранить профиль","primary");
     form.append(submit);

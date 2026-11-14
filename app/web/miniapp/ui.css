@@ -468,6 +468,8 @@ nav button { font-size: 10px; font-weight: 500; }
 .profile-file-square { position: relative; display: grid; place-content: center; justify-items: center; gap: 5px; aspect-ratio: 1; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 14px; background: var(--soft); color: var(--muted); }
 .profile-file-square[data-kind="image"] { background: var(--tint); color: var(--accent-text); }
 .profile-file-square[data-kind="pdf"] { color: var(--danger); }
+.profile-file-square[data-kind="doc"] { color: #2b6cb0; }
+.profile-file-square[data-kind="md"] { color: var(--accent-text); }
 .profile-file-square .icon { width: 32px; height: 32px; }
 .profile-file-square span { font-size: 10px; font-weight: 600; }
 .profile-file-square img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }

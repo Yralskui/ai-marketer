@@ -31,7 +31,7 @@ from app.ingestion.profile_files import IMAGE_EXTENSIONS, fit_image_for_model
 MAX_PAGES = 400
 MAX_TEXT = 500_000  # символов текста на один файл
 MAX_FILE_INPUT = 35_000_000
-PROFILE_CONTEXT_CHARS = 2_000  # профиль в промпте нужен только для контекста
+PROFILE_CONTEXT_CHARS = 8_000  # весь профиль компании: он нужен модели, чтобы понимать контекст
 CHUNK_CHARS = 3_000
 MAX_CHUNKS = 12
 

@@ -30,10 +30,8 @@ from app.agent.context import AgentContext
 from app.agent.harness import active_draft_options, answer, choose_draft_option
 from app.config import IMAGES_DIR
 from app.db.knowledge import (
-    HiddenGeneratedImage,
     MiniUserState,
     PendingPostAction,
-    PendingProfileAttachment,
     ProfileDocument,
 )
 from app.db.models import (
@@ -94,10 +92,9 @@ from app.services import (
     approval,
     business_profile,
     comments,
-    company_attachments,
+    content_gallery,
     content_plan,
     editorial,
-    generated_gallery,
     media,
     posts,
     reports,
@@ -160,7 +157,7 @@ class MiniApp:
         app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
         app.router.add_route(
             "*",
-            "/miniapp/api/{action:state|profiles|select|profile|document|generated|post|plan|chat|chat-progress|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|critique|attachment|channel-status}",
+            "/miniapp/api/{action:state|profiles|select|profile|document|content|post|plan|chat|chat-progress|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|critique|attachment|channel-status}",
             self.api,
         )
 
@@ -203,8 +200,9 @@ class MiniApp:
             ("document", "POST"),
             ("document", "PATCH"),
             ("document", "GET"),
-            ("generated", "GET"),
-            ("generated", "DELETE"),
+            ("content", "GET"),
+            ("content", "PUT"),
+            ("content", "DELETE"),
             ("website", "POST"),
             ("post", "POST"),
             ("post", "PUT"),
@@ -298,14 +296,24 @@ class MiniApp:
                     return await self.document_preview(
                         session, company.id, int(request.query["id"])
                     )
-                if action == "generated" and method == "GET":
+                if action == "content" and method == "GET":
                     company = allowed.get(int(request.query["company"]))
                     if company is None or company.owner_id != user.id:
                         return json_response({"error": "Изображение недоступно"}, 404)
-                    for image_id, path, _ in await generated_gallery.entries(session, company.id):
-                        if image_id == int(request.query["id"]):
-                            return web.FileResponse(path, headers=SECURITY)
-                    return json_response({"error": "Изображение недоступно"}, 404)
+                    item = await content_gallery.get_content(
+                        session, company.id, request.query.get("id")
+                    )
+                    if item is None:
+                        return json_response({"error": "Изображение недоступно"}, 404)
+                    return web.FileResponse(item.path, headers=SECURITY)
+                if action == "content" and method == "PUT":
+                    if (
+                        active is None
+                        or active.owner_id != user.id
+                        or int(request.query.get("company", 0)) != active.id
+                    ):
+                        return json_response({"error": "Выберите свой профиль"}, 403)
+                    return await self.upload_content(request, session, active)
                 if action in {
                     "report",
                     "history",
@@ -432,7 +440,7 @@ class MiniApp:
                     if company is None:
                         return json_response({"error": "Профиль недоступен"}, 404)
                     if (
-                        action in {"profile", "document", "generated", "website"}
+                        action in {"profile", "document", "content", "website"}
                         and company.owner_id != user.id
                     ):
                         return json_response({"error": "Изменять профиль может владелец"}, 403)
@@ -472,16 +480,13 @@ class MiniApp:
                         )
                         if selection.selected_id == company.id:
                             selection.selected_id = default.id if default else None
-                    elif action == "generated":
-                        image_id = int(data["id"])
+                    elif action == "content":
                         await session.execute(
                             select(Business.id).where(Business.id == company.id).with_for_update()
                         )
-                        if any(
-                            entry[0] == image_id
-                            for entry in await generated_gallery.entries(session, company.id)
-                        ):
-                            session.add(HiddenGeneratedImage(revision_id=image_id))
+                        await content_gallery.delete_content(
+                            session, company.id, str(data.get("id", ""))
+                        )
                     elif action == "document":
                         doc = await session.scalar(
                             select(ProfileDocument)
@@ -1305,6 +1310,19 @@ class MiniApp:
             else None
         )
 
+    async def upload_content(self, request, session, company) -> web.Response:
+        """Добавляет картинку в раздел «Контент»: только изображения."""
+        filename = unquote(request.headers.get("X-Filename", ""))
+        data = await self.read_photo(request)
+        if isinstance(data, web.Response):
+            return data
+        try:
+            item = await content_gallery.add_image(session, company, filename, bytes(data))
+        except content_gallery.ContentError as exc:
+            return json_response({"error": str(exc)}, 422)
+        await session.commit()
+        return json_response({"ok": True, "id": item.id})
+
     async def read_photo(self, request) -> bytes | web.Response:
         if request.content_type != "application/octet-stream":
             return json_response({"error": "Ожидалось изображение"}, 415)
@@ -1447,8 +1465,7 @@ class MiniApp:
         items = []
         chat_posts = []
         materials = []
-        generated = []
-        pending_files = {}
+        content = []
         plans = []
         proposal = None
         management = None
@@ -1457,42 +1474,16 @@ class MiniApp:
             dashboard = await self.dashboard(session, active.id)
             if active.owner_id == user.id:
                 management = await self.management_state(session, active)
-                generated = [
+                content = [
                     {
-                        "id": image_id,
-                        "name": f"Изображение №{image_id}",
-                        "size": size,
-                        "preview": size <= DOCUMENT_PREVIEW_MAX_BYTES,
+                        "id": image.id,
+                        "name": image.label,
+                        "kind": image.kind,
+                        "size": image.size,
+                        "preview": image.size <= DOCUMENT_PREVIEW_MAX_BYTES,
                     }
-                    for image_id, _, size in await generated_gallery.entries(session, active.id)
+                    for image in await content_gallery.list_content(session, active.id)
                 ]
-                pending_files = {
-                    item.post_id: {"name": filename, "id": item.document_id}
-                    for item, filename, updated_at in await session.execute(
-                        select(PendingProfileAttachment, ProfileDocument.filename, Post.updated_at)
-                        .join(
-                            ProfileDocument,
-                            ProfileDocument.id == PendingProfileAttachment.document_id,
-                        )
-                        .join(Post, Post.id == PendingProfileAttachment.post_id)
-                        .where(
-                            Post.business_id == active.id,
-                            Post.status.in_(
-                                [
-                                    PostStatus.DRAFT,
-                                    PostStatus.PENDING_APPROVAL,
-                                    PostStatus.FAILED,
-                                    PostStatus.APPROVED,
-                                    PostStatus.SCHEDULED,
-                                ]
-                            ),
-                            ProfileDocument.business_id == active.id,
-                            ProfileDocument.status != "deleted",
-                            PendingProfileAttachment.user_id == user.id,
-                        )
-                    )
-                    if item.version == updated_at.isoformat()
-                }
             pending = await session.get(PendingPostAction, (user.id, active.id))
             if pending is not None:
                 post = await PostRepo(session).get_for_business(pending.proposal["id"], active.id)
@@ -1622,8 +1613,12 @@ class MiniApp:
                 "history": history,
                 "chat_posts": chat_posts,
                 "documents": materials,
-                "generated": generated,
-                "pending_files": pending_files,
+                "content": content,
+                "content_bytes_available": (
+                    await content_gallery.available_bytes(session, active.id)
+                    if active and active.owner_id == user.id
+                    else 0
+                ),
                 "draft_question": await active_draft_options(
                     self.agent_context(session, user, active)
                 )
@@ -1896,29 +1891,7 @@ class MiniApp:
             await session.refresh(post)
             if post.updated_at.isoformat() != version:
                 raise approval.PostChangedError
-            if action in {"attach_company_file", "decline_company_file"}:
-                pending = await session.get(PendingProfileAttachment, post.id, with_for_update=True)
-                if (
-                    company.owner_id != user.id
-                    or pending is None
-                    or pending.user_id != user.id
-                    or pending.document_id != data.get("document")
-                ):
-                    raise ValueError("Запрос на вложение недоступен")
-                if action == "attach_company_file":
-                    if pending.version != version:
-                        raise approval.PostChangedError
-                    await company_attachments.attach_company_file(
-                        session,
-                        company,
-                        post,
-                        pending,
-                        storage=self.container.storage,
-                        business_account=self.container.settings.vk_is_business_account,
-                    )
-                else:
-                    await session.delete(pending)
-            elif action == "copy_to_vk":
+            if action == "copy_to_vk":
                 if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
                     raise ValueError("Сначала подключите сообщество ВКонтакте")
                 copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)

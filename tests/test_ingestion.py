@@ -176,8 +176,8 @@ async def test_text_document_is_one_light_call_and_no_images(models, tmp_path):
     chunks = await instance.analyze(path, "профиль " * 1000)
     assert len(fake.calls) == 1 and fake.calls[0]["model"] == "light-model"
     assert chunks and "Источник" in chunks[0]
-    # профиль в промпте укорочен: в инструкцию не попадает весь длинный профиль
-    assert fake.calls[0]["instructions"].count("профиль") <= 2000 // len("профиль ") + 1
+    # профиль в промпте ограничен 8000 символов: весь длинный профиль не попадает
+    assert fake.calls[0]["instructions"].count("профиль") <= 8000 // len("профиль ") + 1
 
 
 async def test_image_goes_to_heavy_model_compressed(models, tmp_path):

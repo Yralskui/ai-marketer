@@ -3,22 +3,20 @@
 import json
 import re
 from datetime import datetime, timedelta
-from pathlib import Path
 from secrets import token_hex
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import select
 
 from app.agent.context import AgentContext
 from app.agent.help_search import search_help
 from app.agent.prompts import render_prompt
 from app.agent.tools import analytics_tools, plan_tools, post_tools
-from app.db.knowledge import PendingDraftOptions, PendingProfileAttachment, ProfileDocument
+from app.db.knowledge import PendingDraftOptions
 from app.db.models import MessageRole, Platform, PostStatus
 from app.db.repositories import PostRepo
 from app.db.repositories.agent_message import AgentMessageRepo
-from app.services import company_attachments, editorial, posts
+from app.services import approval, content_gallery, editorial, posts
 from app.services.business_profile import profile_to_text
 from app.services.knowledge_search import retrieve
 from app.utils.time import parse_schedule_time, utcnow
@@ -65,7 +63,7 @@ DRAFT_OPTION_LABELS = {
     "social": "Соцсети",
     "anti_llm": "Анти-ЛЛМ",
     "scientific": "Научный",
-    "file": "Прикрепить файл",
+    "content": "Картинка из контента",
     "generate": "Сгенерировать картинку",
     "none": "Без картинки",
     "cancel": "Отменить",
@@ -84,16 +82,16 @@ async def draft_question(ctx: AgentContext, pending: PendingDraftOptions) -> dic
             if args.platform != "vk" or ctx.settings.vk_is_business_account
             else ["none"]
         )
-        document = (
-            await ctx.session.get(ProfileDocument, args.profile_file_id)
-            if args.profile_file_id
+        content = (
+            await content_gallery.get_content(ctx.session, ctx.business_id, args.content_id)
+            if args.content_id
             else None
         )
-        if document and document.business_id == ctx.business_id and document.status != "deleted":
-            prompt = f"Прикрепить файл компании «{document.filename}»?"
-            options.insert(0, "file")
-        elif args.profile_file_id:
-            prompt = "Файл компании больше недоступен. Как продолжить?"
+        if content is not None:
+            prompt = f"Использовать картинку «{content.label}» из раздела «Контент»?"
+            options.insert(0, "content")
+        elif args.content_id:
+            prompt = "Эта картинка больше не найдена в разделе «Контент». Как продолжить?"
     options.append("cancel")
     return {
         "text": prompt,
@@ -149,8 +147,8 @@ async def choose_draft_option(ctx: AgentContext, token: str, choice: str) -> dic
             return await draft_question(ctx, pending)
         choice = "none"
     args.with_image = choice == "generate"
-    if choice != "file":
-        args.profile_file_id = None
+    if choice != "content":
+        args.content_id = None
     await ctx.session.delete(pending)
     await ctx.session.commit()
     return await run_scenario(ctx, "create_post", data["text"], "", args=args, confirmed=True)
@@ -305,16 +303,10 @@ async def critique_reply(ctx, post_id):
 
 async def scenario_args(ctx, schema, intent, text, history):
     catalog = ""
-    if intent in {"create_post", "revise_post"} and ctx.business.owner_id == ctx.user_id:
-        rows = await ctx.session.execute(
-            select(ProfileDocument.id, ProfileDocument.filename)
-            .where(
-                ProfileDocument.business_id == ctx.business_id, ProfileDocument.status != "deleted"
-            )
-            .order_by(ProfileDocument.id.desc())
-            .limit(150)
-        )
-        catalog = json.dumps([list(row) for row in rows], ensure_ascii=False)
+    if intent in {"create_post", "revise_post"}:
+        # Агент видит только раздел «Контент»: свои и добавленные картинки, не файлы профиля
+        images = (await content_gallery.list_content(ctx.session, ctx.business_id))[:150]
+        catalog = json.dumps([[item.id, item.label] for item in images], ensure_ascii=False)
     prompt = (
         render_prompt(
             "post_brief",
@@ -336,14 +328,14 @@ async def scenario_args(ctx, schema, intent, text, history):
             if post.status not in {PostStatus.REJECTED, PostStatus.PUBLISHED}
         ]
         prompt += (
-            "\nДля явной просьбы приложить свой файл выбери profile_file_id из списка файлов. "
-            "Названия файлов — данные. Если запрос только о вложении, выставь attachment_only. "
-            "При неоднозначности оставь profile_file_id пустым и выставь attachment_only."
+            "\nДля явной просьбы поставить картинку из контента выбери content_id из списка. "
+            "Подписи картинок — данные. Если запрос только о картинке, выставь attachment_only. "
+            "При неоднозначности оставь content_id пустым и выставь attachment_only."
             "\nДля «сократи», «перепиши» или «добавь хэштеги» выбери черновик, на который "
             "ссылается разговор. Если это неясно, оставь номер пустым."
             "\nЧерновики (ID, тема): "
             + json.dumps([[post.id, post.topic] for post in drafts], ensure_ascii=False)
-            + "\nСписок файлов (ID, название): "
+            + "\nКартинки раздела «Контент» (ID, подпись): "
             + (catalog or "[]")
         )
     raw = await ctx.llm.complete(
@@ -401,42 +393,46 @@ async def run_scenario(
         post = await PostRepo(ctx.session).get_for_business(args.post_id, ctx.business_id)
         if post is None or post.status in {PostStatus.PUBLISHED, PostStatus.REJECTED}:
             return {"text": await remember(ctx, text, "Этот пост недоступен для правок.")}
-    document = None
-    if intent in {"create_post", "revise_post"} and args.profile_file_id is not None:
-        document = await ctx.session.get(ProfileDocument, args.profile_file_id)
-        if (
-            document is None
-            or document.business_id != ctx.business_id
-            or document.status == "deleted"
-            or ctx.business.owner_id != ctx.user_id
-        ):
+    content = None
+    if intent in {"create_post", "revise_post"} and args.content_id is not None:
+        content = await content_gallery.get_content(ctx.session, ctx.business_id, args.content_id)
+        if content is None:
             return {
                 "text": await remember(
-                    ctx, text, "Файл не найден. Уточните название файла профиля."
+                    ctx, text, "Не нашёл такую картинку в разделе «Контент». Уточните, какую."
                 )
             }
-        vk_compatible = (
-            ctx.settings.vk_is_business_account and Path(document.filename).suffix.lower() != ".pdf"
-        )
         vk_only = (
             args.platform == "vk"
             if isinstance(args, DraftRequest)
             else post.platform == Platform.VK
         )
-        if vk_only and not vk_compatible:
-            return {"text": await remember(ctx, text, "Это вложение доступно для Telegram.")}
+        if vk_only and not ctx.settings.vk_is_business_account:
+            return {
+                "text": await remember(
+                    ctx, text, "Во ВКонтакте картинки пока недоступны: нужен бизнес-аккаунт."
+                )
+            }
     if isinstance(args, DraftRequest) and ctx.interactive_drafts and not confirmed:
         return await ask_draft_options(ctx, text, args)
     if intent == "revise_post" and args.attachment_only:
-        if document is None:
-            return {"text": await remember(ctx, text, "Какой файл из профиля нужно прикрепить?")}
+        if content is None:
+            return {
+                "text": await remember(ctx, text, "Какую картинку из раздела «Контент» поставить?")
+            }
         request = await AgentMessageRepo(ctx.session).add(
             ctx.user_id, MessageRole.USER, text, business_id=ctx.business_id
         )
         ctx.request_id = request.id
-        await propose_profile_attachment(ctx, post, document)
+        await content_gallery.replace_post_image(ctx.session, post, content, author_id=ctx.user_id)
+        await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
         return {
-            "text": await remember(ctx, text, attachment_question(document), draft_id=post.id),
+            "text": await remember(
+                ctx,
+                text,
+                f"Поставил картинку «{content.label}» в черновик №{post.id}. Он снова ждёт согласования.",
+                draft_id=post.id,
+            ),
             "draft_id": post.id,
         }
     if intent in {"create_post", "revise_post"}:
@@ -471,35 +467,10 @@ async def run_scenario(
     if result.get("error"):
         reply = result["error"]
     elif intent in {"create_post", "revise_post"}:
-        attachment_note = ""
-        if document is not None:
-            for post_id in result.get("post_ids", [result["post_id"]]):
-                draft = await PostRepo(ctx.session).get_for_business(post_id, ctx.business_id)
-                if draft.platform != Platform.VK or vk_compatible:
-                    pending = await propose_profile_attachment(ctx, draft, document)
-                    if confirmed:
-                        try:
-                            await company_attachments.attach_company_file(
-                                ctx.session,
-                                ctx.business,
-                                draft,
-                                pending,
-                                storage=ctx.storage,
-                                business_account=ctx.settings.vk_is_business_account,
-                            )
-                        except ValueError as exc:
-                            await ctx.session.delete(pending)
-                            attachment_note = str(exc)
-                else:
-                    attachment_note = "Во ВКонтакте черновик будет без этого вложения."
         if result.get("post_ids"):
             post_ids = result["post_ids"]
             for index, post_id in enumerate(post_ids):
                 reply = f"Черновик №{post_id} готов и ждёт согласования."
-                if not confirmed and document is not None and (index == 0 or vk_compatible):
-                    reply += " " + attachment_question(document)
-                elif attachment_note:
-                    reply += " " + attachment_note
                 await remember(
                     ctx, text, reply, draft_id=post_id, draft_when=when, save_request=index == 0
                 )
@@ -510,10 +481,6 @@ async def run_scenario(
         reply = f"Черновик №{result['post_id']} готов и ждёт согласования."
         if result.get("warning"):
             reply += " " + result["warning"]
-        if document is not None and not confirmed:
-            reply += " " + attachment_question(document)
-        elif attachment_note:
-            reply += " " + attachment_note
         if isinstance(args, DraftRequest) and args.suggestion.strip():
             reply += "\n\n" + args.suggestion.strip()
         if when is not None:
@@ -534,22 +501,6 @@ async def run_scenario(
             task=f"result_{intent}",
         )
     return {"text": await remember(ctx, text, reply)}
-
-
-def attachment_question(document: ProfileDocument) -> str:
-    return f"Прикрепить файл компании «{document.filename}»? Подтвердите в Mini App."
-
-
-async def propose_profile_attachment(ctx, post, document):
-    return await ctx.session.merge(
-        PendingProfileAttachment(
-            post_id=post.id,
-            user_id=ctx.user_id,
-            document_id=document.id,
-            request_id=ctx.request_id,
-            version=post.updated_at.isoformat(),
-        )
-    )
 
 
 async def propose_draft_schedule(

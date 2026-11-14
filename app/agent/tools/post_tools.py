@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -10,7 +11,7 @@ from app.agent.context import AgentContext
 from app.agent.registry import tool
 from app.db.models import Platform, PostStatus
 from app.db.repositories import ChannelRepo, PostRepo
-from app.services import approval, posts
+from app.services import approval, content_gallery, posts
 from app.services.post_history import RevisionSource
 from app.utils.time import format_local
 
@@ -23,7 +24,11 @@ class CreatePostArgs(BaseModel):
     with_image: bool = Field(False, description="Нужна ли картинка к посту")
     style: posts.PostStyle = Field(posts.PostStyle.NEUTRAL, description="Стиль поста")
     image_direction: str = Field("", max_length=500, description="Конкретный замысел иллюстрации")
-    profile_file_id: int | None = Field(None, gt=0, description="ID выбранного файла компании")
+    content_id: str | None = Field(
+        None,
+        pattern=r"^[gm]\d+$",
+        description="ID картинки из раздела «Контент» (например g12 или m5), если её просят использовать",
+    )
 
 
 @tool(
@@ -41,9 +46,16 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         if args.platform == "both"
         else [Platform(args.platform or "telegram")]
     )
+    content = None
+    if args.content_id:
+        content = await content_gallery.get_content(ctx.session, ctx.business_id, args.content_id)
+        if content is None:
+            return {"error": "Картинка не найдена в разделе «Контент»."}
+        if targets == [Platform.VK] and not ctx.settings.vk_is_business_account:
+            return {"error": "Во ВКонтакте картинки пока недоступны: нужен бизнес-аккаунт."}
     with_image = (
         args.with_image
-        and args.profile_file_id is None
+        and content is None
         and (targets[0] != Platform.VK or ctx.settings.vk_is_business_account)
     )
     post = await posts.create_draft(
@@ -61,7 +73,13 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         progress=ctx.update_progress,
         style=args.style,
         image_direction=args.image_direction,
-        reserve_caption=args.profile_file_id is not None,
+        reserve_caption=content is not None,
+        image_path=(
+            await asyncio.to_thread(content_gallery.copy_for_post, content, ctx.business_id)
+            if content
+            else None
+        ),
+        media_id=content.media_id if content else None,
     )
     created = [post]
     if len(targets) > 1:
@@ -77,7 +95,7 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         "has_image": bool(post.image_path),
         "preview": post.text[:200],
     }
-    if args.with_image and not with_image and args.profile_file_id is None:
+    if args.with_image and not with_image and content is None:
         result["warning"] = "С текущим ключом ВКонтакте пост будет текстовым."
     elif with_image and not post.image_path:
         result["warning"] = (
@@ -103,8 +121,12 @@ class RevisePostArgs(BaseModel):
     post_id: int | None = Field(None, gt=0, description="Номер поста, если его можно определить")
     instruction: str = Field(description="Что изменить, словами клиента", min_length=2)
     style: posts.PostStyle | None = Field(None, description="Новый стиль при явной просьбе")
-    profile_file_id: int | None = Field(None, gt=0, description="ID выбранного файла компании")
-    attachment_only: bool = Field(False, description="Клиент просит только добавить этот файл")
+    content_id: str | None = Field(
+        None,
+        pattern=r"^[gm]\d+$",
+        description="ID картинки из раздела «Контент» (например g12 или m5), если её просят вложить",
+    )
+    attachment_only: bool = Field(False, description="Клиент просит только поставить эту картинку")
     research_question: str = Field(
         "",
         max_length=400,
@@ -130,9 +152,14 @@ async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
         args.instruction,
         web_context=ctx.web_context,
         style=args.style,
-        reserve_caption=args.profile_file_id is not None,
+        reserve_caption=args.content_id is not None,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
     )
+    if args.content_id:
+        content = await content_gallery.get_content(ctx.session, ctx.business_id, args.content_id)
+        if content is None:
+            return {"error": "Картинка не найдена в разделе «Контент»."}
+        await content_gallery.replace_post_image(ctx.session, post, content, author_id=ctx.user_id)
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
     ctx.created_post_ids.append(post.id)
     return {"post_id": post.id, "status": post.status.value, "preview": post.text[:200]}
