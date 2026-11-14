@@ -5,7 +5,8 @@
 
 - "agent"           — по ключевым словам выбирает инструмент; после результата
                       инструмента пишет короткий итоговый ответ;
-- "write_post"      — шаблонный пост по строке «Тема: ...» из user-сообщения;
+- "write_post"      — пост из библиотеки шаблонов по строке «Тема: ...» (для
+                      САЛАВАТСТЕКЛО — по брендбуку, см. post_templates.py);
 - "revise_post"     — простые правки («короче», «эмодзи», «подробнее», ...);
 - "extract_profile" — JSON-профиль бизнеса из сырого текста эвристиками.
 
@@ -21,6 +22,7 @@ import re
 from typing import Any
 
 from app.llm.base import LLMProvider, LLMResponse, Message, ToolCall
+from app.llm.post_templates import render_post
 
 IMAGE_WORDS = ("картин", "фото", "изображ", "иллюстрац", "визуал")
 REVISE_WORDS = ("перепиш", "измени", "исправ", "короч", "сократ", "добав", "убер", "поправ")
@@ -266,20 +268,10 @@ def _hashtag(value: str) -> str:
 
 
 def _write_post(user_msg: str) -> str:
+    """Пост из библиотеки шаблонов (app/llm/post_templates.py) по теме и названию компании."""
     topic = _line_value(user_msg, "Тема", "новости компании")
     business = _line_value(user_msg, "Название бизнеса", "Мы")
-    title = topic[:1].upper() + topic[1:]
-    return (
-        f"✨ {title}\n\n"
-        f"{business} делится новостью: {topic}. "
-        "Мы подготовили это специально для вас — с заботой о качестве и деталях.\n\n"
-        "Что вас ждёт:\n"
-        "• внимательный подход к каждому клиенту\n"
-        "• честные цены и понятные условия\n"
-        "• приятные бонусы для постоянных гостей\n\n"
-        "Напишите нам в личные сообщения — расскажем подробности!\n\n"
-        f"#{_hashtag(topic)} #{_hashtag(business)}"
-    )
+    return render_post(topic, business)
 
 
 _EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿]️?")
