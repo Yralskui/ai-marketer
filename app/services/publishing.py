@@ -106,7 +106,11 @@ class PublishingService:
             result.url or "",
             business_id=post.business_id,
             post_id=post.id,
-            payload={"dry_run": result.dry_run, "platform": Platform(post.platform).value},
+            payload={
+                "dry_run": result.dry_run,
+                "platform": Platform(post.platform).value,
+                **({"note": result.note} if result.note else {}),
+            },
         )
         await record_decision(session, post, event)
         await session.commit()

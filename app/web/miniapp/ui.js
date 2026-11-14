@@ -82,7 +82,7 @@ function feedback(text, kind = "info") {
     notice.textContent = text;
     notice.dataset.kind = kind;
     notice.hidden = !text;
-    if (text) noticeTimer = setTimeout(() => { notice.hidden = true; }, kind === "error" ? 7000 : 3500);
+    if (text) noticeTimer = setTimeout(() => { notice.hidden = true; }, ["error", "warning"].includes(kind) ? 8000 : 3500);
 }
 
 async function guarded(node, action) {
@@ -988,12 +988,14 @@ function editPlan(plan, changePlan) {
 /* ---------- Посты ---------- */
 
 async function postAction(post, action, fields = {}, message) {
-    await api("post", "POST", {id: post.id, company: state.active, action, version: post.version, ...fields});
+    const result = await api("post", "POST", {id: post.id, company: state.active, action, version: post.version, ...fields});
     if (["approve", "schedule", "publish"].includes(action)) remember("approved:" + state.active, "1");
     haptic("success");
     closeSheet();
     await load();
-    if (message) feedback(message, "success");
+    // Пост вышел не полностью (например, без картинки) — объясняем, а не рапортуем об успехе
+    if (result?.note) feedback(result.note, "warning");
+    else if (message) feedback(message, "success");
 }
 
 function postCard(post) {
@@ -1384,8 +1386,8 @@ function vkSheet(company) {
     }
     const steps = el("ol", undefined, "steps");
     for (const step of [
-        "Нужно сообщество с лентой новостей: публичная страница или «Бизнес», а не группа-чат с участниками.",
-        "Ключ доступа сообщества (Управление → Работа с API) с правами на стену и фотографии добавляет администратор сервера в VK_COMMUNITIES.",
+        "Нужно сообщество ВКонтакте, стена которого не выключена и не закрыта.",
+        "Ключ доступа (Управление → Работа с API) добавляет администратор сервера в VK_COMMUNITIES. Ключ сообщества публикует текст и показывает подписчиков; картинки, правка и просмотры — только с токеном администратора.",
         "Впишите ссылку на сообщество ниже и нажмите «Проверить и подключить».",
     ]) steps.append(el("li", step));
     const label = el("label", "Ссылка на сообщество");

@@ -21,6 +21,8 @@ class PublishResult:
     external_id: str
     url: str | None = None
     dry_run: bool = False
+    # Необязательное пояснение человеку: пост вышел, но не полностью (например, без картинки)
+    note: str | None = None
 
 
 @dataclass

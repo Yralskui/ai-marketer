@@ -32,6 +32,21 @@ from tests.test_miniapp import BOT_TOKEN, signed_user
 
 GROUP = 777
 TOKEN = "vk1.a.secret-test-token"
+ERROR_27 = {
+    "error": {
+        "error_code": 27,
+        "error_msg": "Group authorization failed: method is unavailable with group auth.",
+    }
+}
+# Методы, которые ВК не пускает с ключом сообщества (подтверждено на живом ключе)
+COMMUNITY_KEY_FORBIDDEN = {
+    "photos.getWallUploadServer",
+    "photos.saveWallPhoto",
+    "wall.getById",
+    "wall.get",
+    "wall.edit",
+    "wall.delete",
+}
 
 
 async def no_sleep(_seconds: float) -> None:
@@ -49,6 +64,8 @@ class FakeVK:
         self.wall_state = 1
         self.fail: dict[str, list[dict | Exception]] = {}
         self.next_id = 100
+        # Режим «ключ сообщества»: ровно то, что ВК ответил на живом ключе (проверено 14.11.2026)
+        self.restricted = False
 
     def methods(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -65,6 +82,13 @@ class FakeVK:
         method = request.url.path.rsplit("/", 1)[-1]
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.calls.append((method, form))
+        if self.restricted and method in COMMUNITY_KEY_FORBIDDEN:
+            return httpx.Response(200, json=ERROR_27)
+        if method == "groups.getTokenPermissions":
+            # Права отдаёт только ключ сообщества; токен пользователя получает ошибку 27
+            if not self.restricted:
+                return httpx.Response(200, json=ERROR_27)
+            return httpx.Response(200, json={"response": {"mask": 1, "permissions": []}})
         queued = self.fail.get(method)
         if queued:
             outcome = queued.pop(0)
@@ -263,16 +287,33 @@ async def test_missing_image_file_publishes_text_only(publisher, vk):
     assert vk.methods() == ["wall.post"]
 
 
-async def test_photo_error_stops_publication_with_hint(publisher, vk, tmp_path):
+async def test_unexpected_photo_error_stops_publication(publisher, vk, tmp_path):
+    """Сбой картинки не из-за прав (например, плохой файл) — пост не публикуем без неё."""
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
-    vk.fail["photos.saveWallPhoto"] = [
-        {"error": {"error_code": 27, "error_msg": "Group authorization failed"}}
-    ]
-    with pytest.raises(PublishError, match="картинк") as error:
+    vk.fail["photos.saveWallPhoto"] = [{"error": {"error_code": 100, "error_msg": "bad photo"}}]
+    with pytest.raises(PublishError, match="картинк"):
         await publisher.publish(post(image_path=str(image)), channel())
-    assert "токен администратора" in str(error.value)
-    assert "wall.post" not in vk.methods()  # без картинки текст молча не публикуем
+    assert "wall.post" not in vk.methods()
+
+
+async def test_community_key_publishes_text_and_explains_missing_photo(publisher, vk, tmp_path):
+    """Живой ключ сообщества не грузит фото (27): текст выходит, человек получает пояснение."""
+    vk.restricted = True
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await publisher.publish(post(image_path=str(image)), channel())
+    assert result.external_id == "100" and result.url.endswith("_100")
+    assert "без картинки" in result.note and "токен администратора" in result.note
+    assert "attachments" not in vk.params("wall.post")
+    assert vk.methods()[-1] == "wall.post"
+
+
+async def test_user_token_publishes_with_photo_and_no_note(publisher, vk, tmp_path):
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await publisher.publish(post(image_path=str(image)), channel())
+    assert result.note is None and vk.params("wall.post")["attachments"]
 
 
 async def test_publish_network_error_warns_about_possible_duplicate(publisher, vk):
@@ -318,6 +359,24 @@ async def test_edit_of_deleted_record_is_reported(publisher):
         await publisher.edit(post(external_id="999"), channel(), "текст")
 
 
+async def test_edit_when_wall_cannot_be_read_changes_only_text(publisher, vk):
+    """Ключ без чтения стены (27): у наших записей вложений нет, правим один текст."""
+    published = await publisher.publish(post(), channel())
+    vk.fail["wall.getById"] = [ERROR_27]
+    await publisher.edit(post(external_id=published.external_id), channel(), "Новый текст")
+    assert "attachments" not in vk.params("wall.edit")
+    assert vk.wall[int(published.external_id)]["text"] == "Новый текст"
+
+
+async def test_edit_with_community_key_explains_the_limit(publisher, vk):
+    """На живом ключе сообщества wall.edit закрыт (27): понятная ошибка, пост не меняется."""
+    published = await publisher.publish(post(), channel())
+    vk.restricted = True
+    with pytest.raises(PublishError, match="токен администратора"):
+        await publisher.edit(post(external_id=published.external_id), channel(), "Другой текст")
+    assert vk.wall[int(published.external_id)]["text"] == "Привет, ВК!"
+
+
 async def test_edit_needs_vk_record_number(publisher):
     with pytest.raises(PublishError, match="номера записи"):
         await publisher.edit(post(external_id="dry-run-7"), channel(), "текст")
@@ -342,19 +401,29 @@ async def test_check_channel_page_shows_subscribers(publisher):
     assert check.ok
     assert "САЛАВАТСТЕКЛО" in check.message and "1234" in check.message
     assert "публичная страница" in check.message
+    assert "Токен администратора" in check.message  # токен пользователя — все функции
 
 
-async def test_check_channel_warns_about_chat_like_group(publisher, vk):
+async def test_check_channel_new_style_community_is_not_warned(publisher, vk):
+    """Новые сообщества ВК отдают type=group, но это нормальное сообщество с лентой."""
     vk.kind = "group"
     check = await publisher.check_channel(channel())
-    assert check.ok  # публиковать в группу можно, но человек должен знать о разнице
-    assert "группа-чат" in check.message and "публичная страница" in check.message
+    assert check.ok and "сообщество" in check.message
+    assert "чат" not in check.message
 
 
-async def test_check_channel_closed_wall(publisher, vk):
-    vk.wall_state = 3
+async def test_check_channel_says_what_a_community_key_cannot_do(publisher, vk):
+    vk.restricted = True
     check = await publisher.check_channel(channel())
-    assert not check.ok and "стена закрыта" in check.message
+    assert check.ok and "Ключ сообщества" in check.message
+    assert "картинки, правка записей и просмотры недоступны" in check.message
+
+
+@pytest.mark.parametrize(("state", "word"), [(3, "закрыта"), (0, "выключена")])
+async def test_check_channel_wall_unavailable(publisher, vk, state, word):
+    vk.wall_state = state
+    check = await publisher.check_channel(channel())
+    assert not check.ok and f"стена {word}" in check.message
 
 
 async def test_check_channel_without_token():
@@ -679,3 +748,75 @@ async def test_miniapp_vk_flow(settings, db, vk):
         assert response.status == 200
         state = await (await client.get(api + "state", headers=headers)).json()
         assert state["profiles"][0]["vk_channel"] == ""
+
+
+async def test_miniapp_publish_with_community_key_explains_missing_picture(settings, db, vk):
+    """Ваш случай: ключ сообщества, пост с картинкой. Текст выходит, Mini App объясняет, почему
+    без картинки, а диагностика честно перечисляет, что ключ не умеет."""
+    vk.restricted = True
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    settings.vk_communities = f"{GROUP}:{TOKEN}"
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    container.publishing.publishers[Platform.VK] = VKPublisher(
+        VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep)
+    )
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(602)}
+    api = "/miniapp/api/"
+
+    def body(company, item, action, **extra):
+        return {
+            "company": company,
+            "id": item["id"],
+            "version": item["version"],
+            "action": action,
+            **extra,
+        }
+
+    async with TestClient(TestServer(app)) as client:
+        state = await (await client.get(api + "state", headers=headers)).json()
+        company = state["active"]
+        response = await client.patch(
+            api + "profile",
+            headers=headers,
+            json={"company": company, "vk_channel": "https://vk.ru/club777"},
+        )
+        assert response.status == 200, await response.text()
+
+        # пост с фирменной картинкой (повод из календаря) → копия для ВК → публикация
+        key = state["occasions"][0]["key"]
+        await client.post(api + "occasion", headers=headers, json={"company": company, "key": key})
+        state = await (await client.get(api + "state", headers=headers)).json()
+        source = next(p for p in state["posts"] if p["has_image"])
+        response = await client.post(
+            api + "post", headers=headers, json=body(company, source, "copy_to_vk")
+        )
+        assert response.status == 200
+        state = await (await client.get(api + "state", headers=headers)).json()
+        copy = next(p for p in state["posts"] if p["platform"] == "vk")
+        assert copy["has_image"]
+        response = await client.post(
+            api + "post", headers=headers, json=body(company, copy, "publish")
+        )
+        assert response.status == 200, await response.text()
+        result = await response.json()
+        assert "без картинки" in result["note"]
+        assert vk.wall and "attachments" not in vk.params("wall.post")
+
+        # правка живой записи недоступна ключу сообщества — понятная ошибка, текст не меняется
+        history = (await (await client.get(api + "history", headers=headers)).json())["posts"]
+        published = next(p for p in history if p["platform"] == "vk")
+        response = await client.post(
+            api + "post",
+            headers=headers,
+            json=body(company, published, "edit_published", text="Новый текст"),
+        )
+        assert response.status == 400
+        assert "токен администратора" in (await response.json())["error"]
+
+        diagnostics = await (await client.get(api + "diagnostics", headers=headers)).json()
+        assert "Ключ сообщества" in diagnostics["vk_check"]["message"]

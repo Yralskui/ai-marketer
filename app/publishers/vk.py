@@ -31,8 +31,8 @@ _WALL_RE = re.compile(r"^wall-(\d+)_\d+$", re.IGNORECASE)
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.]{2,64}$")
 
 _KINDS = {
-    "page": "публичная страница (лента новостей)",
-    "group": "группа",
+    "page": "публичная страница",
+    "group": "сообщество",  # новые сообщества ВКонтакте — с лентой, API отдаёт им type=group
     "event": "мероприятие",
 }
 
@@ -125,6 +125,7 @@ class VKPublisher(Publisher):
             raise PublishError(f"ВКонтакте: {exc}") from exc
         text = post.text[: PLATFORM_HARD_LIMITS[Platform.VK]]
         attachments: list[str] = []
+        note: str | None = None
         if post.image_path:
             image = Path(post.image_path)
             if not image.exists():
@@ -133,7 +134,17 @@ class VKPublisher(Publisher):
                 try:
                     attachments.append(await client.upload_wall_photo(group_id, image))
                 except VKError as exc:
-                    raise PublishError(f"ВКонтакте: не удалось загрузить картинку — {exc}") from exc
+                    if exc.code not in (15, 27):
+                        raise PublishError(
+                            f"ВКонтакте: не удалось загрузить картинку — {exc}"
+                        ) from exc
+                    # Ключ сообщества не загружает фото — это ограничение самого ВКонтакте.
+                    # Текст выходит без картинки, а человек получает объяснение.
+                    log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
+                    note = (
+                        "Пост вышел без картинки: ВКонтакте не разрешает ключу сообщества "
+                        "загружать фото. Для картинок нужен токен администратора."
+                    )
         try:
             response = await client.call(
                 "wall.post",
@@ -155,7 +166,7 @@ class VKPublisher(Publisher):
             raise PublishError(f"ВКонтакте: {exc}") from exc
         post_id = response["post_id"] if isinstance(response, dict) else response
         return PublishResult(
-            external_id=str(post_id), url=f"https://vk.com/wall-{group_id}_{post_id}"
+            external_id=str(post_id), url=f"https://vk.com/wall-{group_id}_{post_id}", note=note
         )
 
     async def edit(self, post: Post, channel: Channel, text: str) -> None:
@@ -165,22 +176,32 @@ class VKPublisher(Publisher):
             raise PublishError("У поста нет номера записи ВКонтакте — править нечего")
         try:
             client = self.clients.get(group_id)
-            current = await client.call(
-                "wall.getById",
-                {"posts": f"-{group_id}_{post.external_id}"},
-                idempotent=True,
-            )
-            items = current.get("items") if isinstance(current, dict) else current
-            if not items:
-                raise VKError(100, "запись уже удалена из сообщества")
-            # wall.edit без вложений снимает их — передаём прежние заново
+            attachments: list[str] | None = None
+            try:
+                current = await client.call(
+                    "wall.getById",
+                    {"posts": f"-{group_id}_{post.external_id}"},
+                    idempotent=True,
+                )
+            except VKError as exc:
+                # Ключ сообщества не читает стену (27/15). Такой ключ и фото не загружает,
+                # значит, у наших записей вложений нет — правим один текст.
+                if exc.code not in (15, 27):
+                    raise
+                current = None
+            if current is not None:
+                items = current.get("items") if isinstance(current, dict) else current
+                if not items:
+                    raise VKError(100, "запись уже удалена из сообщества")
+                attachments = _attachments_of(items[0])
+            # wall.edit без вложений снимает их — когда они есть, передаём прежние заново
             await client.call(
                 "wall.edit",
                 {
                     "owner_id": -group_id,
                     "post_id": int(post.external_id),
                     "message": text[: PLATFORM_HARD_LIMITS[Platform.VK]],
-                    "attachments": ",".join(_attachments_of(items[0])),
+                    "attachments": ",".join(attachments) if attachments else None,
                 },
             )
         except VKError as exc:
@@ -202,15 +223,24 @@ class VKPublisher(Publisher):
         except (VKError, PublishError) as exc:
             return ChannelCheck(False, f"сообщество недоступно: {exc}")
         community = _community(info)
-        if info.get("wall") == 3:
-            return ChannelCheck(False, f"«{community.name}»: стена закрыта — публиковать нельзя")
+        wall = info.get("wall")
+        if wall in (0, 3):
+            state = "выключена" if wall == 0 else "закрыта"
+            return ChannelCheck(False, f"«{community.name}»: стена {state} — публиковать нельзя")
         kind = _KINDS.get(community.kind, community.kind)
         message = f"«{community.name}» — {kind}"
         if community.members is not None:
             message += f", подписчиков: {community.members}"
-        if community.kind == "group":
-            message += ". Для ленты новостей лучше публичная страница, а не группа-чат"
-        return ChannelCheck(True, message)
+        # Какой это ключ: права ключа сообщества отдаёт только groups.getTokenPermissions
+        try:
+            await client.call("groups.getTokenPermissions", idempotent=True)
+        except VKError:
+            return ChannelCheck(True, message + ". Токен администратора: доступны все функции")
+        return ChannelCheck(
+            True,
+            message + ". Ключ сообщества: публикация текста и подписчики; "
+            "картинки, правка записей и просмотры недоступны (ограничение ВКонтакте)",
+        )
 
 
 def _attachments_of(post: dict[str, Any]) -> list[str]:

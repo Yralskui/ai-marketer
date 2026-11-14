@@ -443,7 +443,10 @@ class MiniApp:
                                 reply = await answer(ctx, message)
                                 await session.commit()
                                 return json_response(reply)
-                            await self.post_action(session, user, company, data)
+                            note = await self.post_action(session, user, company, data)
+                            if note:
+                                await session.commit()
+                                return json_response({"ok": True, "note": note})
                 await session.commit()
                 return json_response({"ok": True})
         except approval.PostChangedError:
@@ -1234,7 +1237,7 @@ class MiniApp:
             self.active_uploads -= 1
         return json_response({"ok": True})
 
-    async def post_action(self, session, user, company, data) -> None:
+    async def post_action(self, session, user, company, data) -> str | None:
         post = await PostRepo(session).get_for_business(int(data["id"]), company.id)
         if post is None:
             raise ValueError("Пост не найден")
@@ -1249,7 +1252,8 @@ class MiniApp:
             )
             if not result.ok:
                 raise ValueError(result.error or "Публикация не состоялась")
-            return
+            # Пояснение, если пост вышел не полностью (например, ВК принял его без картинки)
+            return result.result.note if result.result else None
         async with publishing.post_lock(post.id):
             await session.refresh(post)
             if post.updated_at.isoformat() != version:
