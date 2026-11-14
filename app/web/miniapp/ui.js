@@ -201,6 +201,14 @@ function statusChip(status) {
     return chip;
 }
 
+const PLATFORMS = {telegram: "Telegram", vk: "ВКонтакте"};
+
+/** Метка платформы у поста: Telegram по умолчанию не показываем, чтобы не шуметь. */
+function platformChip(post) {
+    if (!post.platform || post.platform === "telegram") return null;
+    return el("span", PLATFORMS[post.platform] || post.platform, "status platform");
+}
+
 function activeCompany() {
     return state?.profiles.find((item) => item.id === state.active);
 }
@@ -545,20 +553,61 @@ async function publicationHistory() {
     for (const post of result.posts) {
         const card = el("article", undefined, "card");
         card.append(el("h3", post.topic || "Пост №" + post.id));
-        card.append(el("p", post.published_at ? "Опубликован · " + humanDate(post.published_at) : "Отклонён", "muted"));
+        const meta = el("div", undefined, "post-meta");
+        meta.append(el("span", post.published_at ? "Опубликован · " + humanDate(post.published_at) : "Отклонён", "muted"));
+        const platform = platformChip(post);
+        if (platform) meta.append(platform);
+        card.append(meta);
         const details = el("details");
         details.append(el("summary", "Текст поста"), el("p", post.text, "post-body"));
         card.append(details);
-        if (post.url?.startsWith("https://t.me/")) {
-            const link = el("a", "Открыть в Telegram", "link-button");
+        const links = {"https://t.me/": "Открыть в Telegram", "https://vk.com/": "Открыть во ВКонтакте"};
+        const label = Object.entries(links).find(([prefix]) => post.url?.startsWith(prefix))?.[1];
+        if (label) {
+            const link = el("a", label, "link-button");
             link.href = post.url;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
             card.append(link);
         }
+        // Правка живой записи: пока только там, где соцсеть это позволяет (ВКонтакте)
+        if (post.platform === "vk" && post.status === "published" && activeCompany()?.editable) {
+            card.append(button("Изменить текст во ВКонтакте", () => editPublishedSheet(post), "small", "pencil"));
+        }
         body.append(card);
     }
     showSheet("История публикаций", body);
+}
+
+/** Правка текста уже опубликованной записи: меняется и в соцсети, и у нас. */
+function editPublishedSheet(post) {
+    const form = el("form");
+    form.append(el("p", "Запись уже опубликована во ВКонтакте. Новый текст сразу заменит старый — повторного согласования нет, поэтому проверьте его перед сохранением.", "muted"));
+    const label = el("label", "Текст записи");
+    const input = el("textarea");
+    input.rows = 9;
+    input.maxLength = 15000;
+    input.required = true;
+    input.value = post.text;
+    label.append(input);
+    const save = el("button", "Сохранить во ВКонтакте", "primary");
+    save.prepend(icon("check"));
+    form.append(label, save);
+    form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        guarded(save, async () => {
+            if (input.value.trim() === post.text.trim()) throw new Error("Текст не изменился.");
+            await api("post", "POST", {
+                id: post.id, company: state.active, action: "edit_published",
+                version: post.version, text: input.value,
+            });
+            haptic("success");
+            closeSheet();
+            await load();
+            feedback("Запись во ВКонтакте обновлена", "success");
+        });
+    });
+    showSheet("Изменить запись · " + (post.topic || "№" + post.id), form);
 }
 
 async function metricsSheet(params = {hours: 24}) {
@@ -714,6 +763,7 @@ async function versionSheet(postId, before) {
     const sources = {
         chat: "Запрос в чате", scheduler: "Автономный планировщик", plan: "Контент-план",
         manual: "Правка в Mini App", photo: "Фотобанк", occasion: "Календарь поводов",
+        published_edit: "Правка опубликованного поста", copy: "Копия для другой соцсети",
         legacy: "Источник неизвестен",
     };
     const decisions = {
@@ -951,6 +1001,8 @@ function postCard(post) {
     card.dataset.status = post.status;
     const meta = el("div", undefined, "post-meta");
     meta.append(statusChip(post.status));
+    const cardPlatform = platformChip(post);
+    if (cardPlatform) meta.append(cardPlatform);
     if (post.when) {
         const date = el("span", humanDate(post.when), "post-date");
         date.prepend(icon("clock"));
@@ -1044,6 +1096,8 @@ function postSheet(post) {
     const content = el("section", undefined, "post-sheet");
     const status = el("div", undefined, "post-meta");
     status.append(statusChip(post.status));
+    const sheetPlatform = platformChip(post);
+    if (sheetPlatform) status.append(sheetPlatform);
     if (post.when) status.append(el("span", "Выйдет: " + humanDate(post.when), "post-date"));
     content.append(status, postPreview(post));
     if (post.brand_issues?.length) {
@@ -1064,8 +1118,9 @@ function postSheet(post) {
     const primary = el("div", undefined, "action-bar");
     if (canPublish) {
         primary.append(button(post.status === "failed" ? "Повторить публикацию" : "Опубликовать сейчас", async () => {
-            if (await confirmAction("Опубликовать этот пост в канал сейчас?")) {
-                return postAction(post, "publish", {}, "Пост отправлен в канал");
+            const where = post.platform === "vk" ? "во ВКонтакте" : "в канал";
+            if (await confirmAction("Опубликовать этот пост " + where + " сейчас?")) {
+                return postAction(post, "publish", {}, "Пост отправлен " + where);
             }
         }, "primary", "send"));
     }
@@ -1131,6 +1186,11 @@ function postSheet(post) {
 
     const footer = el("div", undefined, "row sheet-footer");
     footer.append(button("Версии поста", () => versionSheet(post.id, 0), "plain", "history"));
+    // Тот же пост для ВКонтакте: новый черновик, который тоже ждёт вашего согласования
+    if (company?.editable && company.vk_channel && post.platform !== "vk" && post.status !== "rejected") {
+        footer.append(button("Копия для ВК", () => postAction(post, "copy_to_vk", {},
+            "Копия для ВКонтакте создана — она в «Нужно ваше решение»"), "plain", "megaphone"));
+    }
     const approved = ["scheduled", "approved"].includes(post.status);
     footer.append(button(approved ? "Снять с расписания" : "Отклонить", async () => {
         const question = approved ? "Снять пост с расписания?" : "Отклонить этот черновик? Он не будет опубликован.";
@@ -1172,6 +1232,13 @@ function profile(company) {
         channelChip.disabled = !company.editable;
         channelChip.addEventListener("click", () => channelSheet(company));
         badges.append(channelChip);
+        const vkChip = el("button", company.vk_channel ? "ВК: " + company.vk_channel : "Подключить ВК",
+            company.vk_channel ? "status" : "status warn");
+        vkChip.type = "button";
+        vkChip.prepend(icon("megaphone"));
+        vkChip.disabled = !company.editable;
+        vkChip.addEventListener("click", () => vkSheet(company));
+        badges.append(vkChip);
         if (company.preset) {
             const shield = el("span", "Стандартный · защищён", "status ok");
             shield.prepend(icon("shield-check"));
@@ -1296,6 +1363,54 @@ function channelSheet(company) {
     if (!company.channel) input.focus();
 }
 
+/** Подключение сообщества ВКонтакте: нужна лента новостей, а не группа-чат. */
+function vkSheet(company) {
+    const form = el("form");
+    if (!company.vk_enabled) {
+        form.append(el("p", "ВКонтакте на сервере ещё не настроен: администратору нужно добавить ключ сообщества в VK_COMMUNITIES (инструкция — docs/VK.md). После этого здесь можно будет подключить сообщество.", "status warn"));
+    }
+    if (company.vk_channel) {
+        const current = el("div", undefined, "card toggle-card");
+        const text = el("div");
+        text.append(el("strong", company.vk_channel), el("p", "Посты публикуются в это сообщество", "muted"));
+        current.append(text, button("Отключить", async () => {
+            if (!await confirmAction("Отключить ВКонтакте? Публикации туда остановятся.")) return;
+            await api("profile", "PATCH", {company: company.id, vk_channel: ""});
+            closeSheet();
+            await load();
+            feedback("ВКонтакте отключён");
+        }, "danger small"));
+        form.append(current);
+    }
+    const steps = el("ol", undefined, "steps");
+    for (const step of [
+        "Нужно сообщество с лентой новостей: публичная страница или «Бизнес», а не группа-чат с участниками.",
+        "Ключ доступа сообщества (Управление → Работа с API) с правами на стену и фотографии добавляет администратор сервера в VK_COMMUNITIES.",
+        "Впишите ссылку на сообщество ниже и нажмите «Проверить и подключить».",
+    ]) steps.append(el("li", step));
+    const label = el("label", "Ссылка на сообщество");
+    const input = el("input");
+    input.required = true;
+    input.autocomplete = "off";
+    input.placeholder = "https://vk.com/название";
+    label.append(input, el("small", "Подойдёт и короткое имя, и club123, и числовой id", "hint"));
+    const submit = el("button", "Проверить и подключить", "primary");
+    submit.prepend(icon("link"));
+    form.append(steps, label, submit);
+    form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        guarded(submit, async () => {
+            await api("profile", "PATCH", {company: company.id, vk_channel: input.value.trim()});
+            haptic("success");
+            closeSheet();
+            await load();
+            feedback("Сообщество подключено — можно публиковать во ВКонтакте", "success");
+        });
+    });
+    showSheet(company.vk_channel ? "ВКонтакте" : "Подключить ВКонтакте", form);
+    if (!company.vk_channel) input.focus();
+}
+
 function management(company) {
     const data = state.management;
     const operations = section("Управление", screen, "layers");
@@ -1324,6 +1439,11 @@ async function diagnosticsSheet() {
         info.dry_run ? "status warn" : "status ok"));
     body.append(el("p", info.channel || "Канал не подключён", "muted"));
     if (info.channel_check) body.append(el("p", info.channel_check.message));
+    if (info.vk_channel) {
+        body.append(el("h3", "ВКонтакте"));
+        body.append(el("p", info.vk_check?.message || info.vk_channel,
+            info.vk_check?.ok ? "status ok" : "status warn"));
+    }
     const list = el("div", undefined, "list");
     for (const job of info.jobs) {
         const row = el("div", undefined, "list-item");

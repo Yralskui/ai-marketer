@@ -419,3 +419,5 @@ button.slide-pick[aria-pressed="true"] { border-color: var(--accent); box-shadow
 }
 button.slide-pick[aria-pressed="true"] .slide-number { background: var(--accent); }
 .slide-choice { color: var(--muted); font-size: .85rem; font-weight: 600; text-align: center; }
+.status.platform { color: #fff; background: #0077ff; }
+:root[data-theme="dark"] .status.platform { background: #2a5fb8; }

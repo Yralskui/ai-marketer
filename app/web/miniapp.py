@@ -52,6 +52,7 @@ from app.db.repositories.agent_message import AgentMessageRepo
 from app.ingestion.knowledge import MATERIAL_EXTENSIONS
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text
 from app.llm.base import LLMError
+from app.publishers.base import PublishError
 from app.services import (
     accounts,
     analytics,
@@ -67,6 +68,7 @@ from app.services import (
     posts,
     reports,
     social_metrics,
+    vk_channel,
 )
 from app.services.document_uploads import DocumentQuotaError, save_document, stage_document
 from app.services.post_history import RevisionSource, save_revision
@@ -683,6 +685,8 @@ class MiniApp:
                         else None,
                         "url": post.external_url,
                         "has_image": bool(post.image_path),
+                        "platform": post.platform,
+                        "version": post.updated_at.isoformat(),
                     }
                     for post in rows
                 ]
@@ -696,11 +700,16 @@ class MiniApp:
         channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
         publisher = self.container.publishing.get_publisher(Platform.TELEGRAM)
         check = await publisher.check_channel(channel) if channel and publisher else None
+        vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
+        vk_publisher = self.container.publishing.get_publisher(Platform.VK)
+        vk_check = await vk_publisher.check_channel(vk) if vk and vk_publisher else None
         scheduler = self.container.scheduler
         return json_response(
             {
                 "channel": channel.external_id if channel else None,
                 "channel_check": asdict(check) if check else None,
+                "vk_channel": (vk.title or vk.external_id) if vk else None,
+                "vk_check": asdict(vk_check) if vk_check else None,
                 "dry_run": self.container.publishing.dry_run,
                 "counts": await PostRepo(session).count_by_status(company.id),
                 "jobs": [
@@ -1072,6 +1081,7 @@ class MiniApp:
         profiles = []
         for company in companies:
             channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
+            vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
             profiles.append(
                 {
                     "id": company.id,
@@ -1080,6 +1090,8 @@ class MiniApp:
                     "editable": company.owner_id == user.id,
                     "invite_enabled": accounts.is_admin(user) and company.owner_id == user.id,
                     "channel": channel.external_id if channel else "",
+                    "vk_channel": (vk.title or vk.external_id) if vk else "",
+                    "vk_enabled": bool(self.container.settings.vk_tokens),
                     "preset": default_profile.is_preset(company),
                 }
             )
@@ -1166,6 +1178,13 @@ class MiniApp:
             current = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
             if current is not None:
                 current.is_active = False
+        if "vk_channel" in data:
+            raw = str(data["vk_channel"]).strip()
+            if raw:
+                publisher = self.container.publishing.get_publisher(Platform.VK)
+                await vk_channel.connect(session, publisher, company, raw)
+            else:
+                await vk_channel.disconnect(session, company)
 
     async def upload(self, request, session, company, user) -> web.Response:
         if self.container.storage is None:
@@ -1296,6 +1315,18 @@ class MiniApp:
                     source=RevisionSource("manual", author_id=user.id, request_text=instruction),
                 )
                 await approval.submit_for_approval(session, post, None, None)
+            elif action == "copy_to_vk":
+                if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
+                    raise ValueError("Сначала подключите сообщество ВКонтакте")
+                copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)
+                await approval.submit_for_approval(session, copy, None, None)
+            elif action == "edit_published" and post.status == PostStatus.PUBLISHED:
+                try:
+                    await publishing.edit_published(
+                        session, post, str(data.get("text", "")), author_id=user.id
+                    )
+                except PublishError as exc:
+                    raise ValueError(str(exc)) from None
             else:
                 raise ValueError("Действие недоступно для этого статуса")
             await session.commit()
