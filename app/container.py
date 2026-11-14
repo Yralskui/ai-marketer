@@ -23,6 +23,8 @@ from app.publishers.analytics import AnalyticsSource
 from app.publishers.base import Publisher
 from app.publishers.max import MaxPublisher
 from app.publishers.vk import VKPublisher
+from app.publishers.vk_analytics import VKAnalytics
+from app.publishers.vk_api import VKClients
 from app.services.document_uploads import UploadLinks
 from app.services.notifier import Notifier
 from app.services.object_storage import ObjectStorage
@@ -54,11 +56,15 @@ class AppContainer:
 def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
     import app.agent.tools  # noqa: F401  — регистрирует инструменты
 
+    # ВКонтакте не зависит от бота: публикация и метрики работают, как только заданы ключи
+    vk_clients = VKClients(settings.vk_tokens, version=settings.vk_api_version)
     publishers: dict[Platform, Publisher] = {
-        Platform.VK: VKPublisher(),
+        Platform.VK: VKPublisher(vk_clients),
         Platform.MAX: MaxPublisher(),
     }
     analytics_sources: dict[Platform, AnalyticsSource] = {}
+    if vk_clients:
+        analytics_sources[Platform.VK] = VKAnalytics(vk_clients)
     db = Database(settings.effective_database_url)
     notifier: Notifier | None = None
     if bot is not None:
