@@ -964,6 +964,7 @@ class MiniApp:
                     "editable": company.owner_id == user.id,
                     "invite_enabled": accounts.is_admin(user) and company.owner_id == user.id,
                     "channel": channel.external_id if channel else "",
+                    "preset": default_profile.is_preset(company),
                 }
             )
         return json_response(
