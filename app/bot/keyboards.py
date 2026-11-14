@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
@@ -196,3 +196,9 @@ def photos_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
         kb.button(text=label, callback_data=MediaCb(action="post", media_id=media_id))
     kb.adjust(1)
     return kb.as_markup()
+
+
+def miniapp_keyboard(url: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Открыть Маркетолог", web_app=WebAppInfo(url=url))
+    return builder.as_markup()

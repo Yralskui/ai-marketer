@@ -26,6 +26,12 @@ class ChannelRepo:
         )
         return result.scalar_one_or_none()
 
+    async def list_for_business(self, business_id: int) -> list[Channel]:
+        result = await self.session.scalars(
+            select(Channel).where(Channel.business_id == business_id).order_by(Channel.id)
+        )
+        return list(result)
+
     async def find_telegram(self, chat_id: int, username: str | None) -> list[Channel]:
         """Активные Telegram-каналы, которые указывают на этот чат (по ID или @username)."""
         ids = [str(chat_id)]
@@ -43,15 +49,17 @@ class ChannelRepo:
     async def upsert(
         self, business_id: int, platform: Platform, external_id: str, title: str = ""
     ) -> Channel:
-        """Один активный канал на платформу: обновляет external_id, если он сменился в .env."""
+        """Сменяет активный канал, сохраняя адрес опубликованных постов."""
         channel = await self.get_active(business_id, platform)
+        if channel is not None and channel.external_id != external_id:
+            channel.is_active = False
+            channel = None
         if channel is None:
             channel = Channel(
                 business_id=business_id, platform=platform, external_id=external_id, title=title
             )
             self.session.add(channel)
         else:
-            channel.external_id = external_id
             if title:
                 channel.title = title
         await self.session.flush()

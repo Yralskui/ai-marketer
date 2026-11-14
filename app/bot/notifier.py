@@ -9,7 +9,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.types import FSInputFile
 
-from app.bot import keyboards, texts
+from app.bot import keyboards
 from app.config import Settings
 from app.db.models import Post
 
@@ -29,18 +29,11 @@ class BotNotifier:
         self.channel_lookup = channel_lookup
 
     async def send_draft(self, chat_id: int, post: Post, revision_no: int | None = None) -> None:
-        channel = None
-        if self.channel_lookup is not None:
-            try:
-                channel = await self.channel_lookup(post)
-            except Exception:
-                log.debug("Не удалось узнать канал поста #%s", post.id, exc_info=True)
-        if post.image_path and Path(post.image_path).exists():
-            await self.bot.send_photo(chat_id, FSInputFile(post.image_path))
+        url = self.settings.telegram_miniapp_url
         await self.bot.send_message(
             chat_id,
-            texts.draft_card(post, revision_no, channel=channel, tz=self.settings.tz),
-            reply_markup=keyboards.draft_keyboard(post.id),
+            f"Черновик №{post.id} готов к согласованию. Откройте его в Mini App.",
+            reply_markup=keyboards.miniapp_keyboard(url) if url else None,
         )
 
     async def send_text(self, chat_id: int, text: str) -> None:

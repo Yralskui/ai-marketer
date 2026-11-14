@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from app.agent.core import Agent
@@ -19,10 +19,13 @@ from app.images.base import ImageProvider
 from app.images.factory import create_image_provider
 from app.llm.base import LLMProvider
 from app.llm.factory import create_llm
+from app.publishers.analytics import AnalyticsSource
 from app.publishers.base import Publisher
 from app.publishers.max import MaxPublisher
 from app.publishers.vk import VKPublisher
+from app.services.document_uploads import UploadLinks
 from app.services.notifier import Notifier
+from app.services.object_storage import ObjectStorage
 from app.services.publishing import PublishingService
 from app.services.usage import MeteredImages, MeteredLLM, Prices, UsageRecorder
 
@@ -43,6 +46,9 @@ class AppContainer:
     notifier: Notifier | None = None
     bot: Bot | None = None
     scheduler: AsyncIOScheduler | None = None
+    upload_links: UploadLinks = field(default_factory=UploadLinks)
+    storage: ObjectStorage | None = None
+    analytics_sources: dict[Platform, AnalyticsSource] = field(default_factory=dict)
 
 
 def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
@@ -52,11 +58,13 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         Platform.VK: VKPublisher(),
         Platform.MAX: MaxPublisher(),
     }
+    analytics_sources: dict[Platform, AnalyticsSource] = {}
     db = Database(settings.effective_database_url)
     notifier: Notifier | None = None
     if bot is not None:
         from app.bot.notifier import BotNotifier
         from app.publishers.telegram import TelegramPublisher
+        from app.publishers.telegram_analytics import TelegramAnalytics
 
         async def channel_of(post: Post) -> str | None:
             async with db.sessionmaker() as session:
@@ -68,6 +76,9 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
                 return channel.title or channel.external_id if channel else None
 
         publishers[Platform.TELEGRAM] = TelegramPublisher(bot)
+        analytics_sources[Platform.TELEGRAM] = TelegramAnalytics(
+            bot, api_id=settings.telegram_api_id, api_hash=settings.telegram_api_hash
+        )
         notifier = BotNotifier(bot, settings, channel_lookup=channel_of)
 
     async def alert_admins(text: str) -> None:
@@ -81,7 +92,9 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
     return AppContainer(
         settings=settings,
         db=db,
-        llm=MeteredLLM(create_llm(settings), recorder, settings.llm_model),
+        llm=MeteredLLM(
+            create_llm(settings), recorder, settings.llm_model_light or settings.llm_model
+        ),
         images=MeteredImages(create_image_provider(settings), recorder),
         publishing=PublishingService(publishers, dry_run=settings.publish_dry_run),
         agent=Agent(
@@ -93,4 +106,6 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         registry=default_registry,
         notifier=notifier,
         bot=bot,
+        analytics_sources=analytics_sources,
+        storage=ObjectStorage(settings) if settings.s3_endpoint else None,
     )

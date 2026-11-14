@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Загрузка документа</title>
+<link rel="stylesheet" href="/upload.css">
+<main>
+<h1>Загрузить документ</h1>
+<p>PDF, изображения и текстовые документы. До 100 МБ с учётом уже загруженных документов.</p>
+<form>
+  <label for="file">Документ</label>
+  <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.docx,.txt,.md,.csv,.json,.rtf" required>
+  <button>Загрузить</button>
+</form>
+<p id="status" role="status" aria-live="polite"></p>
+</main>
+<script src="/upload.js" defer></script>
+</html>

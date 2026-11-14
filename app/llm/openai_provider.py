@@ -56,8 +56,11 @@ class OpenAIProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature if temperature is None else temperature,
         }
+        if self.model.startswith(("gpt-6-luna", "gpt-6-sol")):
+            kwargs["reasoning_effort"] = "none"
+        else:
+            kwargs["temperature"] = self.temperature if temperature is None else temperature
         if tools:
             kwargs["tools"] = tools
         if json_mode:
@@ -75,6 +78,10 @@ class OpenAIProvider(LLMProvider):
 
         if not resp.choices:
             raise LLMError("LLM вернула пустой ответ")
+        details = getattr(getattr(resp, "usage", None), "prompt_tokens_details", None)
+        log.debug(
+            "LLM task=%s cached_input_tokens=%s", task, getattr(details, "cached_tokens", None)
+        )
         msg = resp.choices[0].message
         tool_calls: list[ToolCall] = []
         for tc in msg.tool_calls or []:

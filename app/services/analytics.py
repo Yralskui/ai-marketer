@@ -7,8 +7,7 @@
 - согласования и публикации — статусы постов и `event_log`;
 - расходы — `usage_records` (services/usage.py).
 
-Просмотры постов Bot API не отдаёт (нужен MTProto-клиент от имени пользователя) —
-это ограничение указано в отчёте.
+Текущие счётчики подписчиков, просмотров и пересылок читаются из адаптеров соцсетей.
 """
 
 from __future__ import annotations
@@ -21,9 +20,16 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Business, Comment, CommentStatus, EventLog, EventType
+from app.db.models import (
+    Business,
+    Comment,
+    CommentStatus,
+    EventLog,
+    EventType,
+)
 from app.db.repositories import ChannelRepo, PostMetricRepo, PostRepo
-from app.services import usage
+from app.publishers.analytics import PostMetrics
+from app.services import social_metrics, usage
 from app.utils.time import to_local, utcnow
 
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -39,6 +45,8 @@ class PostStat:
     url: str | None
     weekday: str
     hour: int
+    views: int | None = None
+    forwards: int | None = None
 
 
 @dataclass
@@ -59,7 +67,10 @@ class AnalyticsSummary:
     costs_rub: float = 0.0
     top_posts: list[dict[str, Any]] = field(default_factory=list)
     posts: list[PostStat] = field(default_factory=list)
-    limitations: str = "Просмотры через Bot API недоступны — считаем реакции и комментарии."
+    subscribers: dict[str, int] = field(default_factory=dict)
+    total_views: int | None = None
+    posts_with_views: int = 0
+    limitations: str = ""
 
 
 async def record_reactions(
@@ -102,7 +113,10 @@ def _avg(values: list[int]) -> float | None:
 
 
 async def get_summary(
-    session: AsyncSession, business: Business, days: int = 7, tz: tzinfo | None = None
+    session: AsyncSession,
+    business: Business,
+    days: int = 7,
+    tz: tzinfo | None = None,
 ) -> AnalyticsSummary:
     """Сводка за последние `days` дней."""
     since = utcnow() - timedelta(days=days)
@@ -118,9 +132,13 @@ async def get_summary(
     ).all()
     comments_per_post = Counter(pid for pid, _ in comment_rows if pid is not None)
 
+    subscribers, counters = await social_metrics.latest_metrics(
+        session, business.id, [p.id for p in posts]
+    )
     stats: list[PostStat] = []
     for post in posts:
         local = to_local(post.published_at, tz) if tz and post.published_at else post.published_at
+        social = counters.get(post.id, PostMetrics())
         stats.append(
             PostStat(
                 id=post.id,
@@ -131,11 +149,23 @@ async def get_summary(
                 url=post.external_url,
                 weekday=WEEKDAYS[local.weekday()] if local else "",
                 hour=local.hour if local else 0,
+                views=social.views,
+                forwards=social.forwards,
             )
         )
 
     summary = AnalyticsSummary(period_days=days, company=business.name, posts=stats)
     summary.posts_published = len(stats)
+    summary.subscribers = subscribers
+    views = [s.views for s in stats if s.views is not None]
+    summary.total_views = sum(views) if views else None
+    summary.posts_with_views = len(views)
+    if len(views) < len(stats):
+        summary.limitations = (
+            "Счётчики просмотров доступны только для части публикаций."
+            if views
+            else ("Счётчики просмотров за этот период недоступны.")
+        )
     summary.total_reactions = sum(s.reactions for s in stats)
     summary.avg_reactions = round(summary.total_reactions / len(stats), 1) if stats else 0.0
     summary.comments_total = len(comment_rows)
@@ -171,6 +201,8 @@ def summary_for_llm(summary: AnalyticsSummary) -> dict[str, Any]:
             "topic": s.topic,
             "reactions": s.reactions,
             "comments": s.comments,
+            "views": s.views,
+            "forwards": s.forwards,
             "image": s.has_image,
             "weekday": s.weekday,
             "hour": s.hour,

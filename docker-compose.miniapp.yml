@@ -1,0 +1,67 @@
+services:
+  bot:
+    environment:
+      MINIAPP_PUBLIC_URL: ${MINIAPP_PUBLIC_URL:-http://localhost:8080}
+      DATABASE_URL: postgresql+asyncpg://marketer:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/marketer
+      S3_ENDPOINT: http://objects:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3).close()"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      objects:
+        condition: service_started
+  worker:
+    image: ai-marketer:latest
+    command: ["python", "-m", "app.worker"]
+    environment:
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL_LIGHT: ${LLM_MODEL_LIGHT:-gpt-6-luna}
+      LLM_MODEL_HEAVY: ${LLM_MODEL_HEAVY:-gpt-6-luna}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      S3_BUCKET: ${S3_BUCKET:-ai-marketer}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://marketer:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/marketer
+      S3_ENDPOINT: http://objects:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      objects:
+        condition: service_started
+      bot:
+        condition: service_healthy
+    restart: unless-stopped
+  postgres:
+    image: pgvector/pgvector:pg18-trixie@sha256:ab49524d18df7200b74ac9a475e1db6297fc1eb57da4c214c63d10ecc4b754fa
+    environment:
+      POSTGRES_USER: marketer
+      POSTGRES_DB: marketer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    restart: unless-stopped
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketer -d marketer"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  objects:
+    image: rustfs/rustfs@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    restart: unless-stopped
+    volumes:
+      - s3-data:/data
+volumes:
+  pg-data:
+  s3-data:

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Маркетолог</title>
+<link rel="stylesheet" href="/miniapp/ui.css">
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+<script src="/miniapp/ui.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="wordmark"><span class="brand-icon" data-icon="layers"></span><span>Маркетолог</span></div>
+    <div class="workspace" id="workspace" hidden><span class="workspace-icon" data-icon="building-2"></span><span id="workspace-name"></span></div>
+  <nav aria-label="Разделы" id="tabs" hidden>
+    <button data-tab="home" type="button"><span data-icon="layout-dashboard"></span>Главная</button>
+    <button data-tab="chat" type="button"><span data-icon="messages-square"></span>Чат</button>
+    <button data-tab="profile" type="button"><span data-icon="user-round"></span>Профиль</button>
+  </nav>
+  </aside>
+  <div class="page">
+    <header class="topbar">
+      <div class="title-group"><p id="company" hidden></p><h1 id="title">Маркетолог</h1></div>
+      <button id="refresh" class="icon-button" type="button" aria-label="Обновить" data-icon="refresh-cw"></button>
+    </header>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <main id="screen" aria-live="polite"><p class="empty">Загружаю…</p></main>
+  </div>
+</div>
+<dialog id="sheet" aria-labelledby="sheet-title"><div class="sheet-bar"><h2 id="sheet-title"></h2><button id="close" class="icon-button" type="button" aria-label="Закрыть" data-icon="x"></button></div><div id="sheet-body"></div></dialog>
+</body>
+</html>

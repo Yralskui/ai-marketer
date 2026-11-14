@@ -11,14 +11,19 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import EventType, Post, PostStatus, User
+from app.db.models import ContentPlanItem, ContentPlanItemStatus, EventType, Post, PostStatus, User
 from app.db.repositories import EventLogRepo
 from app.services.notifier import Notifier
+from app.services.post_history import record_decision
 from app.services.posts import STATUS_TITLES, transition
 from app.services.publishing import PublishingService, PublishOutcome
 from app.utils.time import to_utc_naive, utcnow
 
 log = logging.getLogger(__name__)
+
+
+class PostChangedError(ValueError):
+    """Карточка поста устарела."""
 
 
 async def submit_for_approval(
@@ -40,20 +45,26 @@ async def approve(session: AsyncSession, post: Post, user: User) -> Post:
     transition(post, PostStatus.APPROVED)
     post.approved_at = utcnow()
     post.approved_by_user_id = user.id
-    await EventLogRepo(session).log(
+    event = await EventLogRepo(session).log(
         EventType.POST_APPROVED, "", business_id=post.business_id, post_id=post.id
     )
+    await record_decision(session, post, event, user.id)
     return post
 
 
 async def reject(session: AsyncSession, post: Post, user: User) -> Post:
     transition(post, PostStatus.REJECTED)
-    await EventLogRepo(session).log(
+    if post.plan_item_id is not None:
+        item = await session.get(ContentPlanItem, post.plan_item_id)
+        if item is not None:
+            item.status = ContentPlanItemStatus.SKIPPED
+    event = await EventLogRepo(session).log(
         EventType.POST_REJECTED,
         f"Отклонил пользователь {user.telegram_id}",
         business_id=post.business_id,
         post_id=post.id,
     )
+    await record_decision(session, post, event, user.id)
     return post
 
 
@@ -77,7 +88,12 @@ async def schedule(session: AsyncSession, post: Post, when: datetime, user: User
 
 
 async def approve_and_publish(
-    session: AsyncSession, post: Post, user: User, publishing: PublishingService
+    session: AsyncSession,
+    post: Post,
+    user: User,
+    publishing: PublishingService,
+    *,
+    expected_version: str | None = None,
 ) -> PublishOutcome:
     """Кнопка «Опубликовать сейчас».
 
@@ -86,6 +102,8 @@ async def approve_and_publish(
     """
     async with publishing.post_lock(post.id):
         await session.refresh(post)
+        if expected_version is not None and post.updated_at.isoformat() != expected_version:
+            raise PostChangedError
         if post.status not in (PostStatus.PENDING_APPROVAL, PostStatus.FAILED, PostStatus.APPROVED):
             return PublishOutcome(
                 ok=False,

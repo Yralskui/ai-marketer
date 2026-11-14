@@ -25,7 +25,7 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -135,7 +135,7 @@ async def usage_summary(
                 func.coalesce(func.sum(UsageRecord.completion_tokens), 0),
                 func.coalesce(func.sum(UsageRecord.images), 0),
                 func.coalesce(func.sum(UsageRecord.cost_rub), 0.0),
-                func.coalesce(func.max(UsageRecord.estimated), False),
+                func.coalesce(func.max(UsageRecord.estimated.cast(Integer)), 0),
             ).where(UsageRecord.business_id == business_id, UsageRecord.created_at >= since_utc)
         )
     ).one()

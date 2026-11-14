@@ -6,7 +6,8 @@ import pytest
 
 import app.agent.tools  # noqa: F401  — регистрация инструментов
 from app.agent.core import Agent
-from app.db.models import MessageRole, PostStatus
+from app.agent.harness import answer
+from app.db.models import ContentPlanStatus, MessageRole, PostStatus
 from app.db.repositories import AgentMessageRepo, PostRepo
 
 
@@ -48,10 +49,58 @@ async def test_revise_via_agent(agent, agent_ctx, session):
     assert len(await PostRepo(session).list_revisions(post_id)) == 2
 
 
-async def test_stub_tool_says_in_development(agent, agent_ctx):
+async def test_agent_creates_weekly_plan(agent, agent_ctx):
+    from app.services.content_plan import recent_plans
+
     result = await agent.run(agent_ctx, "Составь контент-план на неделю")
     assert result.tool_calls == ["create_content_plan"]
-    assert "разработке" in result.text
+    assert "Утвердите" in result.text
+    (plan,) = await recent_plans(agent_ctx.session, agent_ctx.business_id)
+    assert plan.status == ContentPlanStatus.DRAFT
+    assert len(plan.items) == 5
+    assert len({item.planned_at.date() for item in plan.items}) == 5
+
+
+async def test_platform_help_uses_product_guide_without_running_agent(agent_ctx):
+    calls = []
+
+    class HelpModel:
+        name = "openai"
+
+        async def complete(self, prompt, text, *, task, json_mode=False):
+            calls.append(task)
+            if task == "classify_intent":
+                assert json_mode
+                return '{"intent":"help"}'
+            assert task == "platform_help"
+            assert "Утвердить план" in text
+            assert "Тестовый Владелец" not in prompt
+            return "План можно утвердить на главной."
+
+    agent_ctx.llm = HelpModel()
+    result = await answer(agent_ctx, "Как утвердить план?")
+
+    assert result == {"text": "План можно утвердить на главной."}
+    assert calls == ["classify_intent", "platform_help"]
+
+
+async def test_harness_suggests_schedule_without_approving(agent_ctx, session):
+    class ScenarioModel:
+        async def complete(self, prompt, text, *, task, json_mode=False):
+            return {
+                "classify_intent": '{"intent":"create_post"}',
+                "args_create_post": '{"topic":"Витрины","when":"завтра в 10:00"}',
+                "write_post": "Текст про витрины",
+            }[task]
+
+    agent_ctx.llm = ScenarioModel()
+    result = await answer(agent_ctx, "Подготовь пост про витрины на завтра в 10:00")
+    proposal = result["proposal"]
+    post = await PostRepo(session).get(proposal["id"])
+    assert proposal["action"] == "schedule"
+    assert proposal["company"] == agent_ctx.business_id
+    assert post.status == PostStatus.PENDING_APPROVAL
+    assert post.scheduled_at is None
 
 
 async def test_history_is_saved_and_windowed(agent, agent_ctx, session):

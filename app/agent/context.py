@@ -30,6 +30,8 @@ class AgentContext:
     chat_id: int | None = None
     # Что сделал агент за этот запуск (для ответа и тестов)
     created_post_ids: list[int] = field(default_factory=list)
+    reference: str = ""
+    request_id: int | None = None
 
     @property
     def user_id(self) -> int:

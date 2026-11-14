@@ -27,16 +27,17 @@ flowchart TB
         PS[posts<br/>машина состояний]
         AP[approval<br/>единственный, кто разрешает публикацию]
         PUB[publishing<br/>ensure_publishable + dry-run]
-        STUB[content_plan · analytics · reports<br/>заглушки]
+        PLAN[content_plan · темы, даты и согласование]
+        AN[analytics · reports · usage · comments · media]
     end
 
     subgraph INF[Инфраструктура]
         LLM[llm/*<br/>mock · openai]
-        IMG[images/*<br/>mock]
+        IMG[images/*<br/>mock · openai]
         PBL[publishers/*<br/>telegram · vk · max]
         ING[ingestion<br/>documents · website]
         DB[(SQLite<br/>db/models + repositories)]
-        SCH[scheduler<br/>publish_due_posts каждую минуту]
+        SCH[scheduler<br/>публикация по времени · автоотчёты]
     end
 
     U --> MW --> H
@@ -52,6 +53,8 @@ flowchart TB
     AP --> PUB --> PBL --> CH
     SV --> DB
     SCH --> PUB
+    SCH --> AN
+    SCH --> PLAN
     AP -.->|Notifier| N --> U
     SCH -.->|Notifier| N
 ```
@@ -153,10 +156,11 @@ stateDiagram-v2
 ## Данные
 
 Таблицы: `users`, `businesses` (профиль в JSON), `sources`, `channels`, `posts`,
-`post_revisions`, `content_plans`, `content_plan_items`, `agent_messages`, `event_log`.
+`post_revisions`, `content_plans`, `content_plan_items`, `agent_messages`, `event_log`,
+`post_metrics`, `usage_records`, `comments`, `media_files`.
 Таблицы создаются через `create_all` при старте. Имена ограничений заданы явно
 (`NAMING_CONVENTION`), чтобы позже подключить Alembic. Enum-ы хранятся как VARCHAR со
 значением.
 
-`event_log` — журнал событий (создание, согласование, публикация, ошибки). Из него будут
-строиться аналитика и отчёты (поток B).
+`event_log` — журнал событий (создание, согласование, публикация, ошибки). Он доступен администратору через `/log`. Отчёты используют также данные о постах, реакциях,
+комментариях и расходах.

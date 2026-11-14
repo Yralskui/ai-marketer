@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, Message, MessageOriginChannel, ReplyPar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
-from app.bot.keyboards import CommentCb, cancel_keyboard, comment_keyboard
+from app.bot.keyboards import CommentCb, cancel_keyboard, miniapp_keyboard
 from app.bot.states import CommentStates
 from app.container import AppContainer
 from app.db.models import Business, Comment, CommentStatus, Platform, User
@@ -114,7 +114,9 @@ async def on_group_message(
             await bot.send_message(
                 owner.telegram_id,
                 texts.comment_card(comment, business.name, post),
-                reply_markup=comment_keyboard(comment.id),
+                reply_markup=miniapp_keyboard(container.settings.telegram_miniapp_url)
+                if container.settings.telegram_miniapp_url
+                else None,
             )
     except Exception:
         log.exception("Не удалось отправить карточку комментария #%s владельцу", comment.id)

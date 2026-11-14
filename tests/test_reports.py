@@ -125,3 +125,43 @@ async def test_report_interval_for_demo(settings):
     scheduler = create_scheduler(build_container(settings))
     job = scheduler.get_job("weekly_report")
     assert job is not None and "interval" in str(job.trigger)
+
+
+async def test_social_counters_are_scoped_to_original_channel(db, session, owner, llm, images):
+    from unittest.mock import AsyncMock
+
+    from app.db.repositories import ChannelRepo
+    from app.publishers.analytics import AnalyticsError, ChannelMetrics, PostMetrics
+    from app.services.social_metrics import collect_hour
+
+    _, business = owner
+    p1 = await _published(session, owner, llm, images, "Старый канал")
+    await ChannelRepo(session).upsert(business.id, Platform.TELEGRAM, "@current")
+    p2 = await _published(session, owner, llm, images, "Новый канал")
+    # Telegram может выдать одинаковые ID сообщений в разных каналах.
+    p1.external_id = p2.external_id = "14"
+    dry = await _published(session, owner, llm, images, "Симуляция")
+    dry.external_id = "dry-run-99"
+    await session.flush()
+
+    async def read_posts(channel_id, ids):
+        assert ids == ["14"]
+        if channel_id == "@current":
+            raise AnalyticsError("временный сбой")
+        assert channel_id == "@test_channel"
+        return {"14": PostMetrics(0, 3), "99": PostMetrics(99, 99)}
+
+    source = AsyncMock()
+    source.channel_metrics.return_value = ChannelMetrics(42)
+    source.post_metrics.side_effect = read_posts
+    await session.commit()
+    await collect_hour(db.sessionmaker, {Platform.TELEGRAM: source})
+    summary = await analytics.get_summary(session, business)
+
+    source.channel_metrics.assert_awaited_once_with("@current")
+    assert source.post_metrics.await_count == 2
+    assert summary.subscribers == {"telegram": 42}
+    assert summary.total_views == 0 and summary.posts_with_views == 1
+    assert {stat.id: stat.views for stat in summary.posts} == {p1.id: 0, p2.id: None, dry.id: None}
+    assert {stat.id: stat.forwards for stat in summary.posts}[p1.id] == 3
+    assert "Счётчики просмотров доступны только для части" in summary.limitations

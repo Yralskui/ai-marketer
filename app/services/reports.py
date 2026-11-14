@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import tzinfo
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -50,7 +50,7 @@ class Report:
     def plain_text(self) -> str:
         import re
 
-        return re.sub(r"<[^>]+>", "", self.text)
+        return unescape(re.sub(r"<[^>]+>", "", self.text))
 
 
 # ---------------------------------------------------------------- выводы
@@ -155,10 +155,15 @@ def render_text(s: AnalyticsSummary, ins: Insights) -> str:
         f"💰 Расходы на AI: {s.costs_rub:.2f} ₽"
         f"{top}"
     )
+    for platform, subscribers in s.subscribers.items():
+        text += f"\n👥 Подписчики ({escape(platform)}): <b>{subscribers}</b>"
+    if s.total_views is not None:
+        text += f"\n👁 Просмотры: <b>{s.total_views}</b> по {s.posts_with_views} пост(ам)"
     text += _section("Выводы", ins.conclusions)
     text += _section("Гипотезы", ins.hypotheses)
     text += _section("Что сделать", ins.actions)
-    text += f"\n\n<i>{escape(s.limitations)}</i>"
+    if s.limitations:
+        text += f"\n\n<i>{escape(s.limitations)}</i>"
     return text
 
 
@@ -171,7 +176,7 @@ def _font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def render_chart(s: AnalyticsSummary, path: Path) -> Path:
+def chart_image(s: AnalyticsSummary) -> Image.Image:
     """Столбики «реакции + комментарии» по постам периода."""
     W, H, pad = 1000, 560, 70
     img = Image.new("RGB", (W, H), (248, 250, 252))
@@ -200,8 +205,12 @@ def render_chart(s: AnalyticsSummary, path: Path) -> Path:
         d.text((W - 304, 28), "реакции", font=_font(18), fill=(60, 70, 90))
         d.rectangle((W - 200, 30, W - 182, 48), fill=(120, 205, 225))
         d.text((W - 174, 28), "комментарии", font=_font(18), fill=(60, 70, 90))
+    return img
+
+
+def render_chart(s: AnalyticsSummary, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(path)
+    chart_image(s).save(path)
     return path
 
 

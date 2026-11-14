@@ -223,7 +223,7 @@ class PostRevision(TimestampMixin, Base):
 
 
 class ContentPlan(TimestampMixin, Base):
-    """Заготовка под модуль контент-плана (поток A)."""
+    """Контент-план компании на заданный период."""
 
     __tablename__ = "content_plans"
 

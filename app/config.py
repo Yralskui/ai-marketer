@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import field_validator
@@ -32,12 +33,23 @@ class Settings(BaseSettings):
     telegram_channel_id: str = ""
     # socks5://user:pass@host:port или http://… — если api.telegram.org недоступен (VPS в РФ)
     telegram_proxy: str = ""
+    telegram_api_id: int = 0
+    telegram_api_hash: str = ""
+    upload_public_url: str = ""
+    miniapp_public_url: str = ""
+    miniapp_configure_menu: bool = True
+    miniapp_open_signup: bool = False
+    default_profile_file: str = ""
+    miniapp_stories_file: str = ""
 
     # --- LLM ---
     llm_provider: str = "mock"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    llm_model_light: str = ""
+    llm_model_heavy: str = ""
+    embedding_model: str = "text-embedding-3-small"
     llm_timeout: float = 60.0
     llm_max_retries: int = 3
     llm_temperature: float = 0.7
@@ -45,6 +57,8 @@ class Settings(BaseSettings):
     # --- Изображения ---
     image_provider: str = "mock"
     image_api_key: str = ""
+    image_model: str = "gpt-image-2.5-flare"
+    image_timeout: float = 180.0
 
     # --- Учёт расходов (цены в рублях; mock-провайдеры бесплатны) ---
     llm_price_input_per_1m: float = 15.0
@@ -53,11 +67,16 @@ class Settings(BaseSettings):
 
     # --- Хранилище ---
     database_url: str = ""
+    s3_endpoint: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_bucket: str = "ai-marketer"
 
     # --- Поведение ---
     timezone: str = "Asia/Yekaterinburg"
     publish_dry_run: bool = False
     enable_auto_drafts: bool = False
+    auto_drafts_interval_minutes: int = 0
     enable_weekly_report: bool = False
     publish_check_interval_seconds: int = 60
     # 0 — отчёт по понедельникам в 10:00; N > 0 — каждые N минут (для демо автономности)
@@ -73,11 +92,37 @@ class Settings(BaseSettings):
     def _lower(cls, value: str) -> str:
         return value.strip().lower()
 
+    @field_validator("upload_public_url", "miniapp_public_url")
+    @classmethod
+    def _upload_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value:
+            return ""
+        url = urlsplit(value)
+        local = url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1"}
+        if not (local or url.scheme == "https") or not url.netloc or not url.hostname:
+            raise ValueError("UPLOAD_PUBLIC_URL требует HTTPS (HTTP допускается для localhost)")
+        if (
+            url.username is not None
+            or url.password is not None
+            or url.path
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("UPLOAD_PUBLIC_URL должен содержать только схему, хост и порт")
+        return value
+
     @field_validator("timezone")
     @classmethod
     def _check_timezone(cls, value: str) -> str:
         ZoneInfo(value)  # бросит исключение на неизвестный пояс
         return value
+
+    @property
+    def telegram_miniapp_url(self) -> str | None:
+        if self.miniapp_public_url.startswith("https://"):
+            return f"{self.miniapp_public_url}/miniapp"
+        return None
 
     @property
     def allowed_ids(self) -> set[int]:

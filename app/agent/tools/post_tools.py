@@ -11,6 +11,7 @@ from app.agent.registry import tool
 from app.db.models import Platform, PostStatus
 from app.db.repositories import PostRepo
 from app.services import approval, posts
+from app.services.post_history import RevisionSource
 from app.utils.time import format_local
 
 
@@ -36,15 +37,21 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         topic=args.topic,
         platform=Platform(args.platform),
         with_image=args.with_image,
+        reference=ctx.reference,
+        source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
+        image_model=ctx.settings.image_model,
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
     ctx.created_post_ids.append(post.id)
-    return {
+    result = {
         "post_id": post.id,
         "status": post.status.value,
         "has_image": bool(post.image_path),
         "preview": post.text[:200],
     }
+    if args.with_image and not post.image_path:
+        result["warning"] = "Картинку не удалось сгенерировать. Черновик отправлен без неё."
+    return result
 
 
 class RevisePostArgs(BaseModel):
@@ -60,7 +67,14 @@ async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
     post = await PostRepo(ctx.session).get_for_business(args.post_id, ctx.business_id)
     if post is None:
         return {"error": f"Пост #{args.post_id} не найден"}
-    await posts.revise(ctx.session, ctx.llm, ctx.business, post, args.instruction)
+    await posts.revise(
+        ctx.session,
+        ctx.llm,
+        ctx.business,
+        post,
+        args.instruction,
+        source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
+    )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
     ctx.created_post_ids.append(post.id)
     return {"post_id": post.id, "status": post.status.value, "preview": post.text[:200]}

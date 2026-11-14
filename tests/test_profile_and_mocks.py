@@ -51,16 +51,24 @@ async def test_mock_image(images):
 
 
 def test_scheduler_jobs_follow_flags(settings):
-    """Заглушечные задачи включаются только флагами ENABLE_*."""
+    """Публикация и утверждённые планы работают независимо от флагов."""
     from app.container import build_container
     from app.scheduler.setup import create_scheduler
 
     container = build_container(settings)
-    assert [j.id for j in create_scheduler(container).get_jobs()] == ["publish_due_posts"]
+    assert {j.id for j in create_scheduler(container).get_jobs()} == {
+        "publish_due_posts",
+        "prepare_plan_drafts",
+    }
     settings.enable_auto_drafts = True
     settings.enable_weekly_report = True
     ids = {j.id for j in create_scheduler(container).get_jobs()}
-    assert ids == {"publish_due_posts", "generate_daily_drafts", "weekly_report"}
+    assert ids == {
+        "publish_due_posts",
+        "prepare_plan_drafts",
+        "generate_daily_drafts",
+        "weekly_report",
+    }
 
 
 class _AvatarBot:

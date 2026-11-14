@@ -1,7 +1,9 @@
 # Основные зависимости приложения (Python 3.11+)
 aiogram>=3.13,<4
+Telethon>=1.45,<2
 # SOCKS-прокси для Telegram (TELEGRAM_PROXY=socks5://…)
 aiohttp-socks>=0.8
+aiohttp>=3.9,<4
 SQLAlchemy[asyncio]>=2.0.30,<2.1
 aiosqlite>=0.20
 pydantic>=2.7,<3
@@ -17,3 +19,6 @@ dateparser>=1.2
 Pillow>=10.3
 # Таблица часовых поясов для zoneinfo — обязательна на Windows
 tzdata>=2024.1
+asyncpg>=0.30,<1
+pgvector>=0.4,<1
+boto3>=1.38,<2

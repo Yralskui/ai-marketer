@@ -16,9 +16,18 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Channel, EventType, Platform, Post, PostStatus
+from app.db.models import (
+    Channel,
+    ContentPlanItem,
+    ContentPlanItemStatus,
+    EventType,
+    Platform,
+    Post,
+    PostStatus,
+)
 from app.db.repositories import ChannelRepo, EventLogRepo, PostRepo
 from app.publishers.base import Publisher, PublishError, PublishResult
+from app.services.post_history import record_decision
 from app.services.posts import PUBLISHABLE_STATUSES, ensure_publishable, transition
 from app.utils.time import utcnow
 
@@ -83,13 +92,18 @@ class PublishingService:
         post.published_at = utcnow()
         post.error = None
         transition(post, PostStatus.PUBLISHED)
-        await events.log(
+        if post.plan_item_id is not None:
+            item = await session.get(ContentPlanItem, post.plan_item_id)
+            if item is not None:
+                item.status = ContentPlanItemStatus.PUBLISHED
+        event = await events.log(
             EventType.POST_PUBLISHED,
             result.url or "",
             business_id=post.business_id,
             post_id=post.id,
             payload={"dry_run": result.dry_run, "platform": Platform(post.platform).value},
         )
+        await record_decision(session, post, event)
         await session.commit()
         log.info("Пост #%s опубликован (dry_run=%s) %s", post.id, result.dry_run, result.url or "")
         return PublishOutcome(ok=True, post=post, result=result)

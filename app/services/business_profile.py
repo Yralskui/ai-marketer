@@ -28,6 +28,7 @@ PROFILE_FIELD_TITLES: dict[str, str] = {
     "audience": "Целевая аудитория",
     "usp": "УТП",
     "tone": "Тон общения",
+    "visual_style": "Визуальный стиль",
     "restrictions": "Запреты",
 }
 
@@ -45,6 +46,7 @@ class BusinessProfile(BaseModel):
     audience: str = ""
     usp: str = ""
     tone: str = ""
+    visual_style: str = ""
     restrictions: list[str] = []
 
     @field_validator("products", "restrictions", mode="before")
@@ -55,7 +57,9 @@ class BusinessProfile(BaseModel):
             return [p.strip(" -•") for p in re.split(r"[,;\n]", value) if p.strip(" -•")]
         return value or []
 
-    @field_validator("name", "description", "audience", "usp", "tone", mode="before")
+    @field_validator(
+        "name", "description", "audience", "usp", "tone", "visual_style", mode="before"
+    )
     @classmethod
     def _none_to_str(cls, value: Any) -> Any:
         if isinstance(value, list):
@@ -63,7 +67,7 @@ class BusinessProfile(BaseModel):
         return value or ""
 
     def is_filled(self) -> bool:
-        return bool(self.description or self.products or self.usp)
+        return bool(self.description or self.products or self.usp or self.visual_style or self.tone)
 
     def merged_with(self, other: BusinessProfile) -> BusinessProfile:
         """Новые непустые значения заменяют старые."""
@@ -96,14 +100,24 @@ def profile_to_text(business: Business) -> str:
 
 
 async def add_source(
-    session: AsyncSession, business: Business, type_: SourceType, origin: str, text: str
+    session: AsyncSession,
+    business: Business,
+    type_: SourceType,
+    origin: str,
+    text: str,
+    *,
+    document_bytes: int | None = None,
+    document_path: str | None = None,
 ) -> Source:
     source = await SourceRepo(session).add(business.id, type_, origin, text)
+    payload = {"chars": len(text)}
+    if document_bytes is not None:
+        payload.update(source_id=source.id, bytes=document_bytes, path=document_path)
     await EventLogRepo(session).log(
         EventType.SOURCE_ADDED,
         f"{type_.value}: {origin}",
         business_id=business.id,
-        payload={"chars": len(text)},
+        payload=payload,
     )
     return source
 
@@ -112,7 +126,9 @@ async def build_profile(
     session: AsyncSession, llm: LLMProvider, business: Business
 ) -> BusinessProfile:
     """Собирает профиль из всех источников бизнеса и сохраняет его."""
-    sources = await SourceRepo(session).list_for_business(business.id)
+    sources = [
+        s for s in await SourceRepo(session).list_for_business(business.id) if s.text.strip()
+    ]
     if not sources:
         raise NoSourcesError(
             "Нет материалов о бизнесе: расскажите о нём текстом, файлом или ссылкой"
