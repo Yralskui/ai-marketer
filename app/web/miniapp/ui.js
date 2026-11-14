@@ -746,12 +746,13 @@ function draftActions(post, options = {}) {
     let date;
     const company = state.active;
     async function decide(action) {
+        let outcome;
         try {
             const planned = date?.value ? new Date(date.value).toISOString() : when;
             if (scheduled && action === "approve" && new Date(planned) <= new Date()) {
                 throw new Error("Время публикации прошло. Укажите новую дату.");
             }
-            await api("post","POST",{
+            outcome = await api("post","POST",{
                 company,id:post.id,version:post.version,action,
                 ...(action === "approve" && scheduled ? {when:planned} : {}),
             });
@@ -762,7 +763,11 @@ function draftActions(post, options = {}) {
         }
         await load();
         if (options.refresh) options.refresh();
-        if (action === "approve" && !sheet.open) {
+        if (outcome?.note && sheet.open) {
+            sheetBody.prepend(el("p",outcome.note,"muted"));
+        } else if (outcome?.note) {
+            feedback(outcome.note);
+        } else if (action === "approve" && !sheet.open) {
             feedback(scheduled ? "Публикация запланирована." : "Пост опубликован.");
         }
     }
@@ -802,7 +807,7 @@ function editPost(post, back = () => sheet.close()) {
     const field = el("label", "Текст поста");
     const input = el("textarea");
     input.value = post.text;
-    input.maxLength = 4096;
+    input.maxLength = post.platform === "vk" ? 15000 : 4096;
     field.append(input);
     const attachments = postMedia(post);
     let changed = false;
@@ -971,8 +976,10 @@ function publicationRow(post, action) {
 function metricsSheet(params = {hours:24}, posts = null) {
     return loadSheet("Аналитика","analytics",async () => {
         const publications = posts ?? (await cachedApi("history")).posts.filter(post => post.status === "published" && !post.simulated);
-        const selected = publications.find(post => post.id === Number(params.post)) || publications[0];
+        const filtered = publications.filter(post => !params.platform || params.platform === "all" || post.platform === params.platform);
+        const selected = filtered.find(post => post.id === Number(params.post)) || filtered[0];
         const query = new URLSearchParams({hours:params.hours});
+        if (params.platform) query.set("platform",params.platform);
         if (selected) query.set("post",selected.id);
         const data = await cachedApi("metrics?" + query);
         return {data,selected,publications};
@@ -982,6 +989,18 @@ function metricsSheet(params = {hours:24}, posts = null) {
 
 function renderMetrics(params, posts, selected, data) {
     const body = el("section", undefined, "analytics-sheet");
+    const company = state.profiles.find(item => item.id === state.active);
+    if (company?.vk_channel || posts.some(post => post.platform === "vk")) {
+        const filters = el("div",undefined,"filters");
+        filters.setAttribute("aria-label","Соцсеть");
+        for (const [platform,label] of [["all","Все"],["telegram","Telegram"],["vk","ВКонтакте"]]) {
+            const active = (params.platform || "all") === platform;
+            const choice = button(label,() => metricsSheet({hours:params.hours,platform},posts),active ? "is-active" : undefined);
+            choice.setAttribute("aria-pressed",String(active));
+            filters.append(choice);
+        }
+        body.append(filters);
+    }
     const preview = el("div");
     preview.tabIndex = -1;
     if (selected) {
@@ -994,11 +1013,21 @@ function renderMetrics(params, posts, selected, data) {
     periods.setAttribute("aria-label", "Период");
     for (const [hours, label] of [[24,"За сутки"],[168,"За 7 дней"],[720,"За 30 дней"]]) {
         const active = Number(params.hours) === hours && !params.from;
-        const chip = button(label, () => metricsSheet({hours,post:selected?.id},posts), active ? "is-active" : undefined);
+        const chip = button(label, () => metricsSheet({...params,hours,post:selected?.id},posts), active ? "is-active" : undefined);
         chip.setAttribute("aria-pressed",String(active));
         periods.append(chip);
     }
     body.append(periods, viewBars(data, params.hours));
+    if (selected?.platform === "vk" && !company?.vk_business_account) {
+        body.append(el("p","Просмотры записей недоступны с ключом сообщества ВКонтакте.","muted"));
+    }
+    if (selected?.platform === "vk" || params.platform === "vk") {
+        const channel = data.channels?.find(item => item.platform === "vk");
+        const subscribers = channel?.points.at(-1)?.[1];
+        if (subscribers != null) {
+            body.append(el("p","Подписчики ВКонтакте · " + subscribers.toLocaleString("ru-RU"),"muted"));
+        }
+    }
     const companyId = state.active;
     const critiqueKey = companyId + ":" + selected?.id;
     const panel = el("section", undefined, "critique-panel");
@@ -1048,7 +1077,7 @@ function renderMetrics(params, posts, selected, data) {
     const publications = el("section", undefined, "analytics-publications");
     publications.append(el("h3", "Публикации"));
     if (!posts.length) publications.append(el("p", "Пока нет опубликованных постов.", "muted"));
-    for (const post of posts) {
+    for (const post of posts.filter(post => !params.platform || params.platform === "all" || post.platform === params.platform)) {
         const row = publicationRow(post, () => metricsSheet({...params,post:post.id},posts));
         row.setAttribute("aria-pressed", String(post.id === selected.id));
         publications.append(row);
@@ -1191,6 +1220,14 @@ function renderVersion(data, postId, back) {
         versions.append(card);
     }
     if (data.versions.length) body.append(versions);
+    const company = state.profiles.find(item => item.id === state.active);
+    const post = data.post;
+    if (company?.vk_channel && post?.platform === "telegram") {
+        body.append(button("Копия для ВКонтакте", () => copyToVk(post), "text-button"));
+    }
+    if (company?.editable && post?.editable_live) {
+        body.append(button("Изменить запись во ВКонтакте", () => editLiveVk(post, () => versionSheet(postId,back)), "text-button"));
+    }
     showSheet(data.topic || "История поста", body, "", back);
 }
 
@@ -1285,6 +1322,32 @@ async function postAction(post, action, fields = {}) {
     sheet.close();
     await load();
     if (result.simulated) feedback("Тестовая отправка. Пост в канал не ушёл.");
+    else if (result.note) feedback(result.note);
+}
+
+async function copyToVk(post) {
+    await postAction(post,"copy_to_vk");
+    feedback("Копия для ВКонтакте ждёт согласования.");
+}
+
+function editLiveVk(post, back) {
+    const form = el("form");
+    const field = el("label","Текст опубликованной записи");
+    const input = el("textarea");
+    input.value = post.text;
+    input.required = true;
+    input.maxLength = 15000;
+    field.append(input);
+    const save = el("button","Сохранить во ВКонтакте","primary");
+    form.append(field,save);
+    form.addEventListener("submit",event => {
+        event.preventDefault();
+        guarded(save,async () => {
+            await api("post","POST",{company:state.active,id:post.id,version:post.version,action:"edit_published",text:input.value});
+            await back();
+        });
+    });
+    showSheet("Редактировать запись",form,"",back);
 }
 
 function postSheet(post) {
@@ -1308,6 +1371,9 @@ function postSheet(post) {
             return postAction(post, "schedule", {when: new Date(when.value).toISOString()});
         }, "primary"));
     } else content.append(draftActions(post,{refresh:() => sheet.close()}));
+    if (post.platform === "telegram" && state.profiles.find(item => item.id === state.active)?.vk_channel) {
+        content.append(button("Копия для ВКонтакте",() => copyToVk(post),"text-button"));
+    }
     showSheet(post.topic || "Пост", content);
 }
 
@@ -1372,8 +1438,14 @@ function profile(company) {
                 status.textContent = "Не удалось проверить подключение";
                 status.dataset.status = "error";
             });
-        } else {
+        } else if (!company.vk_channel) {
             channels.append(el("p","Подключите канал, чтобы публиковать и видеть аналитику.","channels-empty"));
+        }
+        if (company.vk_channel) {
+            const connection = el("div",undefined,"channel-line");
+            connection.append(el("span","ВКонтакте · " + company.vk_channel),
+                el("span","Подключено","channel-state"));
+            channels.append(connection);
         }
         card.append(channels);
         screen.append(card);
@@ -1504,6 +1576,15 @@ function profileForm(company) {
         form.append(field);
     }
     form.append(el("p","Для публикации добавьте бота в администраторы канала.","muted"));
+    if (state.profiles.some(profile => profile.vk_enabled) || company?.vk_channel) {
+        const field = el("label","Сообщество ВКонтакте");
+        const input = el("input");
+        input.name = "vk_channel";
+        input.value = company?.vk_id || "";
+        input.placeholder = "vk.com/club123 или ID";
+        field.append(input);
+        form.append(field);
+    }
 
     function addTile(item) {
         const tile = fileTile(item,savedCompany,async () => {
@@ -1709,8 +1790,9 @@ function chat() {
         guarded(send, async () => {
             try {
                 const result = await api("chat", "POST", {company,text,id:job.id});
-                log.push({text:result.text,proposal:result.proposal,draft_id:result.draft_id,draft_when:result.proposal?.when});
+                if (!result.reload_history) log.push({text:result.text,proposal:result.proposal,draft_id:result.draft_id,draft_when:result.proposal?.when});
                 await load();
+                if (result.reload_history && state.active === company) chatLogs.set(company,state.history || []);
             } finally {
                 job.controller.abort();
                 clearTimeout(job.timer);

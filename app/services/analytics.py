@@ -26,6 +26,7 @@ from app.db.models import (
     CommentStatus,
     EventLog,
     EventType,
+    Platform,
 )
 from app.db.repositories import ChannelRepo, PostMetricRepo, PostRepo
 from app.publishers.analytics import PostMetrics
@@ -117,10 +118,13 @@ async def get_summary(
     business: Business,
     days: int = 7,
     tz: tzinfo | None = None,
+    platform: Platform | None = None,
 ) -> AnalyticsSummary:
-    """Сводка за последние `days` дней."""
+    """Сводка за последние `days` дней; `platform` — только посты этой соцсети."""
     since = utcnow() - timedelta(days=days)
     posts = await PostRepo(session).list_published_since(business.id, since)
+    if platform is not None:
+        posts = [post for post in posts if post.platform == platform]
     metrics = await PostMetricRepo(session).for_posts([p.id for p in posts])
 
     comment_rows = (
@@ -135,6 +139,8 @@ async def get_summary(
     subscribers, counters = await social_metrics.latest_metrics(
         session, business.id, [p.id for p in posts]
     )
+    if platform is not None:
+        subscribers = {key: value for key, value in subscribers.items() if key == platform.value}
     stats: list[PostStat] = []
     for post in posts:
         local = to_local(post.published_at, tz) if tz and post.published_at else post.published_at

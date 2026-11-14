@@ -90,6 +90,7 @@ async def run_bot(settings: Settings) -> None:
     if container.storage is not None:
         await container.storage.prepare()
     upload_runner = None
+    vk_tasks = []
     try:
         me = await bot.me()
         log.info(
@@ -114,8 +115,16 @@ async def run_bot(settings: Settings) -> None:
                 log.info("Не удалось задать меню команд для %s", admin_id)
         upload_runner = await start_upload_server(container)
         scheduler.start()
+        if container.vk_clients is not None and not container.vk_clients.business_account:
+            from app.services.vk_engagement import start_longpolls
+
+            _, vk_tasks = await start_longpolls(container.db.sessionmaker, container.vk_clients)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        for task in vk_tasks:
+            task.cancel()
+        if vk_tasks:
+            await asyncio.gather(*vk_tasks, return_exceptions=True)
         if upload_runner is not None:
             await upload_runner.cleanup()
         if scheduler.running:

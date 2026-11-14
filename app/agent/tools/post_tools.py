@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.agent.context import AgentContext
 from app.agent.registry import tool
 from app.db.models import Platform, PostStatus
-from app.db.repositories import PostRepo
+from app.db.repositories import ChannelRepo, PostRepo
 from app.services import approval, posts
 from app.services.post_history import RevisionSource
 from app.utils.time import format_local
@@ -17,8 +17,8 @@ from app.utils.time import format_local
 
 class CreatePostArgs(BaseModel):
     topic: str = Field(description="Тема поста, своими словами клиента", min_length=2)
-    platform: Literal["telegram", "vk", "max"] = Field(
-        "telegram", description="Площадка; сейчас публикация работает только в telegram"
+    platform: Literal["telegram", "vk", "both", "max"] | None = Field(
+        None, description="Площадка, явно указанная пользователем: Telegram, VK или обе"
     )
     with_image: bool = Field(False, description="Нужна ли картинка к посту")
     style: posts.PostStyle = Field(posts.PostStyle.NEUTRAL, description="Стиль поста")
@@ -31,14 +31,26 @@ class CreatePostArgs(BaseModel):
     "(клиент увидит текст с кнопками «Опубликовать / Запланировать / Изменить / Отклонить»).",
 )
 async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
+    if args.platform is None:
+        args.platform = await sole_or_default_platform(ctx)
+        if args.platform is None:
+            return {"error": "Куда готовить пост: в Telegram, во ВКонтакте или в обе соцсети?"}
+    targets = (
+        [Platform.TELEGRAM, Platform.VK]
+        if args.platform == "both"
+        else [Platform(args.platform or "telegram")]
+    )
+    with_image = args.with_image and (
+        targets[0] != Platform.VK or ctx.settings.vk_is_business_account
+    )
     post = await posts.create_draft(
         ctx.session,
         ctx.llm,
         ctx.images,
         ctx.business,
         topic=args.topic,
-        platform=Platform(args.platform),
-        with_image=args.with_image,
+        platform=targets[0],
+        with_image=with_image,
         reference=ctx.reference,
         web_context=ctx.web_context,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
@@ -47,17 +59,37 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         style=args.style,
         image_direction=args.image_direction,
     )
-    await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
-    ctx.created_post_ids.append(post.id)
+    created = [post]
+    if len(targets) > 1:
+        created.append(
+            await posts.clone_for_platform(ctx.session, post, targets[1], author_id=ctx.user_id)
+        )
+    for item in created:
+        await approval.submit_for_approval(ctx.session, item, ctx.notifier, ctx.target_chat_id)
+        ctx.created_post_ids.append(item.id)
     result = {
         "post_id": post.id,
         "status": post.status.value,
         "has_image": bool(post.image_path),
         "preview": post.text[:200],
     }
-    if args.with_image and not post.image_path:
+    if args.with_image and not with_image:
+        result["warning"] = "С текущим ключом ВКонтакте пост будет текстовым."
+    elif with_image and not post.image_path:
         result["warning"] = "Картинку не удалось сгенерировать. Черновик отправлен без неё."
+    if len(created) > 1:
+        result["post_ids"] = [item.id for item in created]
     return result
+
+
+async def sole_or_default_platform(ctx: AgentContext) -> str | None:
+    channels = ChannelRepo(ctx.session)
+    connected = [
+        platform.value
+        for platform in (Platform.TELEGRAM, Platform.VK)
+        if await channels.get_active(ctx.business_id, platform) is not None
+    ]
+    return None if len(connected) > 1 else (connected[0] if connected else "telegram")
 
 
 class RevisePostArgs(BaseModel):

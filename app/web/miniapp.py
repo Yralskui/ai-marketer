@@ -79,7 +79,9 @@ from app.ingestion.profile_files import (
 )
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text
 from app.llm.base import LLMError
+from app.publishers.base import PublishError
 from app.publishers.telegram_text import format_text
+from app.publishers.vk import VKPublisher
 from app.services import (
     accounts,
     analytics,
@@ -92,6 +94,7 @@ from app.services import (
     posts,
     reports,
     social_metrics,
+    vk_channel,
 )
 from app.services.document_uploads import (
     DocumentQuotaError,
@@ -373,7 +376,8 @@ class MiniApp:
                     if active is None or active.owner_id != user.id:
                         return json_response({"error": "Выберите свой профиль"}, 403)
                     return await self.replace_photo(request, session, active, user)
-                if request.content_length is None or request.content_length > 32_768:
+                limit = 128_000 if action == "post" else 32_768
+                if request.content_length is None or request.content_length > limit:
                     return json_response({"error": "Слишком большой запрос"}, 413)
                 data = await request.json()
                 if not isinstance(data, dict):
@@ -836,7 +840,11 @@ class MiniApp:
         else:
             raise ValueError("Выберите 24 часа, 7 или 30 дней")
         post_id = int(query.get("post", 0)) or None
-        payload = await social_metrics.series(session, company.id, start, end, post_id)
+        value = query.get("platform", "all")
+        if value not in {"all", "telegram", "vk"}:
+            raise ValueError("Выберите Telegram или ВКонтакте")
+        platform = Platform(value) if value != "all" else None
+        payload = await social_metrics.series(session, company.id, start, end, post_id, platform)
         payload.update(
             critique=None,
             can_critique=False,
@@ -845,7 +853,11 @@ class MiniApp:
         )
         if post_id is not None:
             post = await PostRepo(session).get_for_business(post_id, company.id)
-            if post is None or post.status != PostStatus.PUBLISHED:
+            if (
+                post is None
+                or post.status != PostStatus.PUBLISHED
+                or (platform and post.platform != platform)
+            ):
                 return json_response({"error": "Пост не найден"}, 404)
             stored = await session.get(PostCritique, post.id)
             payload["critique"] = stored.result if stored else None
@@ -996,6 +1008,16 @@ class MiniApp:
                 "topic": post.topic,
                 "platform": post.platform,
                 "plan_item_id": post.plan_item_id,
+                "post": {
+                    "id": post.id,
+                    "platform": post.platform,
+                    "text": post.text,
+                    "version": post.updated_at.isoformat(),
+                    "editable_live": post.platform == Platform.VK
+                    and post.status == PostStatus.PUBLISHED
+                    and self.container.settings.vk_is_business_account
+                    and not (post.external_id or "").startswith("dry-run-"),
+                },
                 "timeline": timeline,
                 "versions": [
                     {
@@ -1048,6 +1070,10 @@ class MiniApp:
                         else None,
                         "url": post.external_url,
                         "simulated": (post.external_id or "").startswith("dry-run-"),
+                        "editable_live": post.platform == Platform.VK
+                        and post.status == PostStatus.PUBLISHED
+                        and self.container.settings.vk_is_business_account
+                        and not (post.external_id or "").startswith("dry-run-"),
                         "has_image": bool(post.image_path),
                     }
                     for post in rows
@@ -1432,6 +1458,7 @@ class MiniApp:
             companies, key=lambda item: not (item.settings or {}).get("miniapp_default")
         ):
             channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
+            vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
             profiles.append(
                 {
                     "id": company.id,
@@ -1441,6 +1468,10 @@ class MiniApp:
                     "invite_enabled": accounts.is_admin(user) and company.owner_id == user.id,
                     "channel": await self.channel_label(channel) if channel else "",
                     "website": (company.settings or {}).get("miniapp_website", ""),
+                    "vk_channel": (vk.title or vk.external_id) if vk else "",
+                    "vk_id": vk.external_id if vk else "",
+                    "vk_enabled": self.container.vk_clients is not None,
+                    "vk_business_account": self.container.settings.vk_is_business_account,
                     "is_default": bool((company.settings or {}).get("miniapp_default")),
                 }
             )
@@ -1582,6 +1613,18 @@ class MiniApp:
         await business_profile.update_profile_fields(session, company, fields)
         if (company.settings or {}).get("default_placeholder"):
             company.settings = {**company.settings, "default_placeholder": False}
+        if "vk_channel" in data:
+            raw = str(data["vk_channel"]).strip()
+            current = await ChannelRepo(session).get_active(company.id, Platform.VK)
+            if raw and not (current and raw in (current.external_id, current.title)):
+                if not accounts.is_admin(user):
+                    raise ValueError("Подключение сообщества ВКонтакте настраивает администратор")
+                publisher = self.container.publishing.get_publisher(Platform.VK)
+                await vk_channel.connect(
+                    session, publisher if isinstance(publisher, VKPublisher) else None, company, raw
+                )
+            elif not raw and current:
+                await vk_channel.disconnect(session, company)
         if data.get("channel"):
             raw_channel = str(data["channel"]).strip()
             channels = ChannelRepo(session)
@@ -1701,12 +1744,29 @@ class MiniApp:
                     "ok": True,
                     "simulated": bool(result.result and result.result.dry_run),
                     "url": result.result.url if result.result else None,
+                    **(
+                        {"note": result.result.note} if result.result and result.result.note else {}
+                    ),
                 }
         async with publishing.post_lock(post.id):
             await session.refresh(post)
             if post.updated_at.isoformat() != version:
                 raise approval.PostChangedError
-            if action == "submit" and post.status in {PostStatus.DRAFT, PostStatus.FAILED}:
+            if action == "copy_to_vk":
+                if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
+                    raise ValueError("Сначала подключите сообщество ВКонтакте")
+                copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)
+                await approval.submit_for_approval(session, copy, None, None)
+            elif action == "edit_published" and post.platform == Platform.VK:
+                if company.owner_id != user.id:
+                    raise ValueError("Редактировать публикацию может владелец профиля")
+                try:
+                    await publishing.edit_published(
+                        session, post, str(data.get("text", "")), author_id=user.id
+                    )
+                except PublishError as exc:
+                    raise ValueError(str(exc)) from None
+            elif action == "submit" and post.status in {PostStatus.DRAFT, PostStatus.FAILED}:
                 if post.status == PostStatus.FAILED:
                     posts.transition(post, PostStatus.DRAFT)
                 await approval.submit_for_approval(session, post, None, None)
@@ -1819,16 +1879,15 @@ class MiniApp:
                         else:
                             raise ValueError("Вложение недоступно")
                 has_media = bool(new_items) if new_items is not None else bool(post.image_path)
+                platform = Platform(post.platform)
+                hard_limit = posts.PLATFORM_HARD_LIMITS[platform]
                 limit = (
                     posts.TELEGRAM_CAPTION_LIMIT
-                    if has_media
-                    else posts.PLATFORM_HARD_LIMITS[Platform(post.platform)]
+                    if platform == Platform.TELEGRAM and has_media
+                    else hard_limit
                 )
-                if (
-                    (not value and not has_media)
-                    or format_text(value)[1] > limit
-                    or len(value) > 4096
-                ):
+                text_length = format_text(value)[1] if platform == Platform.TELEGRAM else len(value)
+                if (not value and not has_media) or text_length > limit or len(value) > hard_limit:
                     raise ValueError(
                         f"Текст должен уложиться в {limit} символов. Посту нужен текст или вложение."
                     )

@@ -76,6 +76,8 @@ async def publish_due_posts(
                 text = f"✅ Запланированный пост #{post.id} опубликован."
                 if post.external_url:
                     text += f"\n{post.external_url}"
+                if outcome.result and outcome.result.note:
+                    text += "\n" + html.escape(outcome.result.note)
             else:
                 text = (
                     f"⚠️ Не удалось опубликовать пост #{post.id}: {html.escape(outcome.error or '')}"
@@ -290,3 +292,7 @@ async def weekly_report_job(container: AppContainer) -> None:
 
 async def collect_social_metrics(container: AppContainer) -> None:
     await social_metrics.collect_hour(container.db.sessionmaker, container.analytics_sources)
+    if container.vk_clients is not None:
+        from app.services import vk_engagement
+
+        await vk_engagement.sync_engagement(container.db.sessionmaker, container.vk_clients)

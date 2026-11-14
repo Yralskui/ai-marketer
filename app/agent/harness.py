@@ -242,9 +242,16 @@ async def run_scenario(
         if args.suggestion.strip():
             reply += "\n\n" + args.suggestion.strip()
         return {"text": await remember(ctx, text, reply)}
-    if isinstance(args, DraftRequest) and args.platform != "telegram":
-        reply = "Сейчас доступна публикация в Telegram. Могу подготовить черновик для Telegram."
-        return {"text": await remember(ctx, text, reply)}
+    if isinstance(args, DraftRequest):
+        if args.platform is None:
+            args.platform = await post_tools.sole_or_default_platform(ctx)
+        if args.platform is None or args.platform == "max":
+            reply = (
+                "Куда готовить пост: в Telegram, во ВКонтакте или в обе соцсети?"
+                if args.platform is None
+                else "Для черновика выберите Telegram или ВКонтакте."
+            )
+            return {"text": await remember(ctx, text, reply)}
     when = None
     if isinstance(args, DraftRequest) and args.when:
         try:
@@ -287,6 +294,17 @@ async def run_scenario(
     if result.get("error"):
         reply = result["error"]
     elif intent in {"create_post", "revise_post"}:
+        if result.get("post_ids"):
+            post_ids = result["post_ids"]
+            for index, post_id in enumerate(post_ids):
+                reply = f"Черновик №{post_id} готов и ждёт согласования."
+                await remember(
+                    ctx, text, reply, draft_id=post_id, draft_when=when, save_request=index == 0
+                )
+            return {
+                "text": "Готовы два черновика: для Telegram и ВКонтакте.",
+                "reload_history": True,
+            }
         reply = f"Черновик №{result['post_id']} готов и ждёт согласования."
         if result.get("warning"):
             reply += " " + result["warning"]
@@ -338,9 +356,10 @@ async def remember(
     *,
     draft_id: int | None = None,
     draft_when: datetime | None = None,
+    save_request: bool = True,
 ) -> str:
     history = AgentMessageRepo(ctx.session)
-    if ctx.request_id is None:
+    if save_request and ctx.request_id is None:
         await history.add(ctx.user_id, MessageRole.USER, text, business_id=ctx.business_id)
     ctx.request_id = None
     draft_ref = f"draft:{draft_id}" if draft_id is not None else None

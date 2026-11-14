@@ -245,6 +245,39 @@ async def create_draft(
     return post
 
 
+async def clone_for_platform(
+    session: AsyncSession, post: Post, platform: Platform, *, author_id: int | None = None
+) -> Post:
+    if post.platform == platform:
+        raise ValueError("Пост уже предназначен для этой платформы")
+    channel = await ChannelRepo(session).get_active(post.business_id, platform)
+    copy = Post(
+        business_id=post.business_id,
+        channel_id=channel.id if channel else None,
+        platform=platform,
+        topic=post.topic,
+        text=clean_post_text(post.text, platform),
+        image_path=post.image_path,
+        status=PostStatus.DRAFT,
+    )
+    await PostRepo(session).add(copy)
+    album = await session.get(PostAttachments, post.id)
+    if album:
+        session.add(PostAttachments(post_id=copy.id, items=album.items))
+    style = await post_style(session, post.id)
+    if style != PostStyle.NEUTRAL:
+        session.add(PostEditorialSettings(post_id=copy.id, style=style))
+    await session.flush()
+    await save_revision(
+        session,
+        copy,
+        RevisionSource("copy", author_id=author_id, request_text=f"Копия поста №{post.id}"),
+        image_change=True,
+        image_source="copy" if album or post.image_path else None,
+    )
+    return copy
+
+
 async def revise(
     session: AsyncSession,
     llm: LLMProvider,
