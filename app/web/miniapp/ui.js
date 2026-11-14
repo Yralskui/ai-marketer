@@ -384,6 +384,7 @@ function home(company) {
     if (!pending.length) decide.append(el("p", "Всё согласовано. Новые черновики появятся здесь.", "empty"));
     pending.forEach((post) => decide.append(postCard(post)));
 
+    if (state.occasions?.length && company?.editable) showOccasions(company);
     if (state.plans?.length) showPlans();
 
     const board = el("div", undefined, "board");
@@ -709,7 +710,8 @@ async function versionSheet(postId, before) {
     if (data.plan_item_id) body.append(el("p", "Пункт контент-плана №" + data.plan_item_id, "muted"));
     const sources = {
         chat: "Запрос в чате", scheduler: "Автономный планировщик", plan: "Контент-план",
-        manual: "Правка в Mini App", photo: "Фотобанк", legacy: "Источник неизвестен",
+        manual: "Правка в Mini App", photo: "Фотобанк", occasion: "Календарь поводов",
+        legacy: "Источник неизвестен",
     };
     const decisions = {
         post_approved: "Утверждена", post_published: "Опубликована", post_rejected: "Отклонена",
@@ -779,6 +781,50 @@ async function reportSheet(days = 7) {
         body.append(list);
     }
     showSheet("Отчёт", body);
+}
+
+/** Ближайшие поводы из календаря компании: пост готовится сам за 3 дня или сразу по кнопке. */
+function showOccasions(company) {
+    const node = section("Ближайшие поводы", screen, "calendar-days", undefined,
+        "За 3 дня до даты пост придёт на согласование сам");
+    const list = el("div", undefined, "list");
+    const dateLabel = new Intl.DateTimeFormat("ru-RU", {day: "numeric", month: "long"});
+    for (const item of state.occasions) {
+        const row = el("div", undefined, "list-item");
+        const name = el("span", item.title);
+        const days = item.days === 0 ? "сегодня" : item.days === 1 ? "завтра" : "через " + item.days + " дн.";
+        name.append(el("small", dateLabel.format(new Date(item.date + "T12:00:00")) + " · " + days));
+        row.append(name, button("Пост сейчас", async () => {
+            const result = await api("occasion", "POST", {company: company.id, key: item.key});
+            haptic("success");
+            await load();
+            const post = state.posts.find((entry) => entry.id === result.id);
+            if (post) postSheet(post);
+            else feedback("Черновик готов — он в «Нужно ваше решение»", "success");
+        }, "small", "sparkles"));
+        list.append(row);
+    }
+    node.append(list);
+}
+
+/** Карусель из поста: слайды в фирменном стиле и отправка альбомом в чат с ботом. */
+async function carouselSheet(post) {
+    const data = await api("carousel?id=" + post.id);
+    const body = el("section");
+    body.append(el("p", "Слайды собраны из текста поста в фирменном стиле. Пришлю их вам в чат с ботом альбомом — его можно переслать в канал.", "muted"));
+    const strip = el("div", undefined, "slides");
+    data.slides.forEach((encoded, index) => {
+        const image = el("img", undefined, "slide");
+        image.alt = "Слайд " + (index + 1);
+        image.src = "data:image/png;base64," + encoded;
+        strip.append(image);
+    });
+    body.append(strip, button("Прислать мне в чат (" + data.slides.length + " сл.)", async () => {
+        await api("carousel", "POST", {company: state.active, id: post.id});
+        haptic("success");
+        feedback("Карусель отправлена в чат с ботом", "success");
+    }, "primary", "send"));
+    showSheet("Карусель · " + postTitle(post), body);
 }
 
 function showPlans() {
@@ -1047,6 +1093,7 @@ function postSheet(post) {
             feedback("Фото добавлено — пост снова на согласовании", "success");
         }), undefined, "camera"));
         if (post.has_image) row.append(button("Убрать", () => postAction(post, "remove_photo", {}, "Изображение убрано"), "plain"));
+        row.append(button("Карусель", () => carouselSheet(post), undefined, "layers"));
         media.append(row);
     }
 

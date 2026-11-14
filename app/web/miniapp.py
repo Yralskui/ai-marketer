@@ -15,6 +15,7 @@ from urllib.parse import unquote
 
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import FSInputFile, InputMediaPhoto
 from aiohttp import web
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select, text, update
@@ -57,10 +58,12 @@ from app.services import (
     approval,
     brand,
     business_profile,
+    carousel,
     comments,
     content_plan,
     default_profile,
     media,
+    occasions,
     posts,
     reports,
     social_metrics,
@@ -102,7 +105,7 @@ class MiniApp:
         app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
         app.router.add_route(
             "*",
-            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions}",
+            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|occasion|carousel}",
             self.api,
         )
 
@@ -142,6 +145,9 @@ class MiniApp:
             ("chat", "POST"),
             ("settings", "POST"),
             ("comment", "POST"),
+            ("occasion", "POST"),
+            ("carousel", "GET"),
+            ("carousel", "POST"),
         }:
             return json_response({"error": "Метод недоступен"}, 405)
         authorization = request.headers.get("Authorization", "")
@@ -235,6 +241,25 @@ class MiniApp:
                             return json_response({"error": "Пост не найден"}, 404)
                         return await self.versions(session, post)
                     return await self.diagnostics(session, active)
+                if action == "carousel" and method == "GET":
+                    post = (
+                        await PostRepo(session).get_for_business(
+                            int(request.query.get("id", 0)), active.id
+                        )
+                        if active
+                        else None
+                    )
+                    if post is None:
+                        return json_response({"error": "Пост не найден"}, 404)
+                    paths = await carousel.build(active, post, IMAGES_DIR / "carousel")
+                    return json_response(
+                        {
+                            "slides": [
+                                b64encode(await asyncio.to_thread(path.read_bytes)).decode("ascii")
+                                for path in paths
+                            ]
+                        }
+                    )
                 if action == "preview":
                     post_id = int(request.query.get("id", 0))
                     post = (
@@ -307,6 +332,12 @@ class MiniApp:
                         if selection.selected_id != company.id or company.owner_id != user.id:
                             return json_response({"error": "Выберите свой профиль"}, 403)
                         return await self.manage_company(session, company, user, action, data)
+                    if action in {"occasion", "carousel"}:
+                        if selection.selected_id != company.id or company.owner_id != user.id:
+                            return json_response({"error": "Выберите свой профиль"}, 403)
+                        if action == "occasion":
+                            return await self.occasion_draft(session, company, user, data)
+                        return await self.send_carousel(session, company, user, data)
                     if action == "profile" and method == "PATCH":
                         await self.edit_profile(session, company, user, data)
                     elif action == "profile":
@@ -814,6 +845,57 @@ class MiniApp:
             image.convert("RGB").save(output, "JPEG", quality=92)
             return output.getvalue()
 
+    async def occasion_draft(self, session, company, user, data) -> web.Response:
+        """Пост к поводу из календаря компании — сразу, не дожидаясь даты."""
+        occasion = next(
+            (item for item in occasions.occasions_for(company) if item.key == data.get("key")),
+            None,
+        )
+        if occasion is None:
+            raise ValueError("Повод не найден")
+        async with usage_scope(session, company.id):
+            post = await posts.create_draft(
+                session,
+                self.container.llm,
+                self.container.images,
+                company,
+                occasion.topic,
+                with_image=True,
+                source=RevisionSource("occasion", author_id=user.id, request_text=occasion.title),
+                image_model=self.container.settings.image_model,
+            )
+            await approval.submit_for_approval(session, post, None, None)
+        return json_response({"id": post.id})
+
+    async def send_carousel(self, session, company, user, data) -> web.Response:
+        """Слайды карусели — альбомом в личный чат с ботом: переслать в канал или сохранить."""
+        bot = self.container.bot
+        if bot is None:
+            raise ValueError("Бот сейчас не подключён к Telegram — отправить карусель нельзя")
+        post = await PostRepo(session).get_for_business(int(data.get("id", 0)), company.id)
+        if post is None:
+            return json_response({"error": "Пост не найден"}, 404)
+        paths = await carousel.build(company, post, IMAGES_DIR / "carousel")
+        caption = f"Карусель к посту №{post.id}: перешлите в канал или сохраните."
+        try:
+            if len(paths) == 1:
+                await bot.send_photo(user.telegram_id, FSInputFile(paths[0]), caption=caption)
+            else:
+                await bot.send_media_group(
+                    user.telegram_id,
+                    [
+                        InputMediaPhoto(
+                            media=FSInputFile(path), caption=caption if i == 0 else None
+                        )
+                        for i, path in enumerate(paths)
+                    ],
+                )
+        except TelegramAPIError:
+            raise ValueError(
+                "Не удалось отправить: откройте чат с ботом и нажмите «Старт»"
+            ) from None
+        return json_response({"ok": True, "slides": len(paths)})
+
     async def manage_company(self, session, company, user, action, data) -> web.Response:
         if action == "comment":
             item = await session.scalar(
@@ -972,6 +1054,7 @@ class MiniApp:
                     "preset": default_profile.is_preset(company),
                 }
             )
+        today = to_local(utcnow(), self.container.settings.tz).date()
         return json_response(
             {
                 "user": identity.model_dump(),
@@ -985,6 +1068,17 @@ class MiniApp:
                 "documents": materials,
                 "storage": self.container.storage is not None,
                 "stories": self.stories(),
+                "occasions": [
+                    {
+                        "key": occasion.key,
+                        "title": occasion.title,
+                        "date": when.isoformat(),
+                        "days": (when - today).days,
+                    }
+                    for occasion, when in occasions.upcoming(active, today)
+                ]
+                if active
+                else [],
             }
         )
 
