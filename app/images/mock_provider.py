@@ -37,6 +37,9 @@ class MockImageProvider(ImageProvider):
     async def generate(self, prompt: str, *, size: tuple[int, int] = (1024, 1024)) -> Path:
         return await asyncio.to_thread(self._render, prompt, size)
 
+    async def edit(self, prompt: str, references: list[Path]) -> Path:
+        return await self.generate(prompt)
+
     def _render(self, prompt: str, size: tuple[int, int]) -> Path:
         digest = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
         path = self.output_dir / f"mock_{digest}.png"

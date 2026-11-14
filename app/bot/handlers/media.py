@@ -21,7 +21,7 @@ from app.container import AppContainer
 from app.db.models import Business, PostStatus, User
 from app.db.repositories import MediaRepo
 from app.llm.base import LLMError
-from app.services import accounts, approval, editorial, media
+from app.services import accounts, approval, media, posts
 from app.services.media import MediaError
 from app.services.posts import InvalidTransitionError
 
@@ -57,9 +57,6 @@ async def _make_post(
     try:
         photo = await media.get_photo(session, business, media_id)
         async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-            web_context = await editorial.verified_post_context(
-                container.research_llm, container.settings.tz, topic or photo.caption or ""
-            )
             post = await media.create_post_with_photo(
                 session,
                 container.llm,
@@ -67,9 +64,8 @@ async def _make_post(
                 business,
                 photo,
                 topic,
-                web_context=web_context,
             )
-    except (MediaError, LLMError, editorial.UnverifiedPostFacts) as exc:
+    except (MediaError, LLMError, posts.MissingPostInformation) as exc:
         await message.answer(escape(str(exc)))
         return
     await approval.submit_for_approval(session, post, container.notifier, message.chat.id)

@@ -135,7 +135,12 @@ def render_profile_image(path: Path, suffix: str, size: int, output_format: str)
 
 
 def fit_image_for_model(
-    path: Path, suffix: str, box: tuple[int, int] = MODEL_IMAGE_BOX, quality: int = 85
+    path: Path,
+    suffix: str,
+    box: tuple[int, int] = MODEL_IMAGE_BOX,
+    quality: int = 85,
+    *,
+    preserve_transparency: bool = False,
 ) -> bytes:
     """JPEG для модели: вписывается в рамку Full HD с сохранением пропорций, без обрезки.
 
@@ -154,6 +159,10 @@ def fit_image_for_model(
         rendered = ImageOps.exif_transpose(image).convert("RGBA")
     limit = box if rendered.width >= rendered.height else (box[1], box[0])
     rendered.thumbnail(limit, Image.Resampling.LANCZOS)  # только уменьшает, пропорции сохраняет
+    if preserve_transparency and rendered.getchannel("A").getextrema()[0] < 255:
+        with BytesIO() as output:
+            rendered.save(output, "PNG", optimize=True)
+            return output.getvalue()
     background = Image.new("RGB", rendered.size, "white")
     background.paste(rendered, mask=rendered.getchannel("A"))
     with BytesIO() as output:

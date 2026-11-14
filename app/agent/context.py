@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.models import Business, User
@@ -39,6 +39,7 @@ class AgentContext:
     progress: Callable[[str], None] | None = None
     interactive_drafts: bool = False
     storage: ObjectStorage | None = None
+    session_factory: async_sessionmaker[AsyncSession] | None = None
 
     def update_progress(self, stage: str) -> None:
         if self.progress is not None:

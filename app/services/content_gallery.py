@@ -59,6 +59,11 @@ class ContentImage:
     label: str
     media_id: int | None = None
 
+    @property
+    def number(self) -> int:
+        revision_or_media_id = int(self.id[1:])
+        return revision_or_media_id * 3 - (1 if self.kind == "uploaded" else 2)
+
 
 def parse_id(value: str | None) -> tuple[str, int] | None:
     match = _ID.match((value or "").strip().lower())
@@ -133,7 +138,7 @@ def _prepare_upload(filename: str, data: bytes) -> bytes:
     temp = folder / f"{secrets.token_hex(8)}{suffix}"
     try:
         temp.write_bytes(data)
-        return fit_image_for_model(temp, suffix, quality=88)
+        return fit_image_for_model(temp, suffix, quality=88, preserve_transparency=True)
     except ProfileFileFormatError as exc:
         raise ContentError(str(exc)) from exc
     except Exception as exc:  # битый файл под видом картинки
@@ -145,16 +150,17 @@ def _prepare_upload(filename: str, data: bytes) -> bytes:
 async def add_image(
     session: AsyncSession, business: Business, filename: str, data: bytes
 ) -> ContentImage:
-    """Добавляет картинку: вписывается в Full HD без обрезки, сохраняется как JPEG."""
+    """Вписывает картинку в Full HD, сохраняя прозрачность в PNG."""
     if not 0 < len(data) <= MAX_UPLOAD_BYTES:
         raise ContentError("Изображение должно быть от 1 байта до 20 МБ.")
-    jpeg = await asyncio.to_thread(_prepare_upload, filename, data)
-    if len(jpeg) > await available_bytes(session, business.id):
+    encoded = await asyncio.to_thread(_prepare_upload, filename, data)
+    if len(encoded) > await available_bytes(session, business.id):
         raise ContentError("В разделе «Контент» не осталось места: лимит 100 МБ.")
     folder = UPLOADS_DIR / str(business.id)
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{secrets.token_hex(8)}.jpg"
-    path.write_bytes(jpeg)
+    suffix = ".png" if encoded.startswith(b"\x89PNG") else ".jpg"
+    path = folder / f"{secrets.token_hex(8)}{suffix}"
+    path.write_bytes(encoded)
     caption = Path(filename).stem[:200]
     media = await MediaRepo(session).add(
         MediaFile(business_id=business.id, path=str(path), caption=caption)
@@ -163,7 +169,7 @@ async def add_image(
         EventType.PHOTO_ADDED, caption or path.name, business_id=business.id
     )
     return ContentImage(
-        f"m{media.id}", "uploaded", path, len(jpeg), caption or f"Фото №{media.id}", media.id
+        f"m{media.id}", "uploaded", path, len(encoded), caption or f"Фото №{media.id}", media.id
     )
 
 
@@ -187,10 +193,14 @@ async def delete_content(session: AsyncSession, business_id: int, content_id: st
 
 def copy_for_post(item: ContentImage, business_id: int) -> str:
     """Копия файла для поста: удаление картинки из раздела не ломает уже готовые посты."""
+    return copy_path_for_post(item.path, business_id)
+
+
+def copy_path_for_post(path: Path, business_id: int) -> str:
     folder = USED_DIR / str(business_id)
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{secrets.token_hex(8)}{item.path.suffix.lower() or '.jpg'}"
-    shutil.copyfile(item.path, target)
+    target = folder / f"{secrets.token_hex(8)}{path.suffix.lower() or '.jpg'}"
+    shutil.copyfile(path, target)
     return str(target)
 
 

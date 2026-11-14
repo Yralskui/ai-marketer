@@ -63,6 +63,10 @@ class DbSessionMiddleware(BaseMiddleware):
                 await session.commit()
                 return result
 
+        settings = self.container.settings
+        if settings.telegram_allowlist_only and tg_user.id not in settings.allowed_ids:
+            await _deny(event, tg_user)
+            return None
         async with self.container.db.sessionmaker() as session:
             payload = start_payload(event)
             if payload:

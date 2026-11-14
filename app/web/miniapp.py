@@ -24,13 +24,14 @@ from aiohttp import web
 from botocore.exceptions import BotoCoreError, ClientError
 from defusedxml.common import DefusedXmlException
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 
 from app.agent.context import AgentContext
 from app.agent.harness import active_draft_options, answer, choose_draft_option
 from app.config import IMAGES_DIR
 from app.db.knowledge import (
     MiniUserState,
+    PendingDraftOptions,
     PendingPostAction,
     ProfileDocument,
 )
@@ -81,10 +82,10 @@ from app.ingestion.profile_files import (
     render_profile_image,
     validate_profile_file,
 )
-from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text
+from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text, public_url
 from app.llm.base import LLMError
 from app.publishers.base import PublishError
-from app.publishers.telegram_text import format_text
+from app.publishers.telegram_text import format_text, formatted_post
 from app.publishers.vk import VKPublisher
 from app.services import (
     accounts,
@@ -108,6 +109,7 @@ from app.services.document_uploads import (
     save_document,
     stage_document,
 )
+from app.services.image_references import document_image_number
 from app.services.post_history import RevisionSource, save_revision
 from app.services.usage import BudgetExceededError, get_budget, month_spend, set_budget, usage_scope
 from app.utils.time import format_local, to_local, to_utc_naive, utcnow
@@ -154,7 +156,9 @@ class MiniApp:
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/miniapp", self.asset)
-        app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
+        app.router.add_get(
+            r"/miniapp/{asset:ui\.js|post-text\.js|ui\.css|icons\.svg|glass\.webp}", self.asset
+        )
         app.router.add_route(
             "*",
             "/miniapp/api/{action:state|profiles|select|profile|document|content|post|plan|chat|chat-progress|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|critique|attachment|channel-status}",
@@ -203,7 +207,6 @@ class MiniApp:
             ("content", "GET"),
             ("content", "PUT"),
             ("content", "DELETE"),
-            ("content", "POST"),
             ("website", "POST"),
             ("post", "POST"),
             ("post", "PUT"),
@@ -211,7 +214,9 @@ class MiniApp:
             ("photo", "PUT"),
             ("photo", "POST"),
             ("plan", "POST"),
+            ("chat", "GET"),
             ("chat", "POST"),
+            ("chat", "DELETE"),
             ("chat-progress", "GET"),
             ("settings", "POST"),
             ("comment", "POST"),
@@ -227,6 +232,9 @@ class MiniApp:
             )
         except (ValueError, KeyError):
             return json_response({"error": "Откройте приложение из Telegram."}, 401)
+        settings = self.container.settings
+        if settings.telegram_allowlist_only and identity.id not in settings.allowed_ids:
+            return json_response({"error": "Доступ к приложению закрыт"}, 403)
         try:
             async with self.container.db.sessionmaker() as session:
                 # Параллельные запросы первого открытия создают только одну копию шаблона.
@@ -254,16 +262,12 @@ class MiniApp:
                         identity.id, identity.name, role=role
                     )
                 selection = await session.get(MiniUserState, user.id)
-                if selection is None:
-                    selection = MiniUserState(user_id=user.id, selected_id=user.business_id)
-                    session.add(selection)
-                    await session.flush()
                 default = None
                 if user.is_active and (
                     not accounts.is_admin(user)
                     or user.telegram_id in self.container.settings.allowed_ids
                 ):
-                    default = await self.ensure_default_profile(session, user, selection)
+                    selection, default = await self.initialize_profiles(session, user, selection)
                 await session.commit()
                 if not user.is_active or (
                     accounts.is_admin(user)
@@ -288,8 +292,17 @@ class MiniApp:
                     company = allowed.get(int(request.query.get("company", 0)))
                     if company is None:
                         return json_response({"error": "Профиль недоступен"}, 404)
-                    channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
-                    return json_response(await self.channel_status(channel))
+                    platform = Platform(request.query.get("platform", "telegram"))
+                    channel = await ChannelRepo(session).get_active(company.id, platform)
+                    if platform == Platform.VK:
+                        return json_response(await self.vk_channel_status(channel))
+                    if platform == Platform.TELEGRAM:
+                        return json_response(await self.channel_status(channel))
+                    raise ValueError("Проверка подключения недоступна для этой площадки.")
+                if action == "chat" and method == "GET":
+                    if active is None:
+                        return json_response({"error": "Выберите профиль"}, 409)
+                    return json_response(await self.chat_state(session, user, active))
                 if action == "document" and method == "GET":
                     company = allowed.get(int(request.query["company"]))
                     if company is None or company.owner_id != user.id:
@@ -410,9 +423,12 @@ class MiniApp:
                         return json_response({"error": "Выберите свой профиль"}, 403)
                     return await self.replace_photo(request, session, active, user)
                 limit = 128_000 if action == "post" else 32_768
-                if request.content_length is None or request.content_length > limit:
+                if action == "chat" and method == "DELETE" and "company" in request.query:
+                    data = {"company": int(request.query["company"])}
+                elif request.content_length is None or request.content_length > limit:
                     return json_response({"error": "Слишком большой запрос"}, 413)
-                data = await request.json()
+                else:
+                    data = await request.json()
                 if not isinstance(data, dict):
                     raise ValueError("Ожидался объект")
                 if (
@@ -481,18 +497,6 @@ class MiniApp:
                         )
                         if selection.selected_id == company.id:
                             selection.selected_id = default.id if default else None
-                    elif action == "content" and method == "POST":
-                        # логотип для сгенерированных картинок: загруженная картинка или «без логотипа»
-                        raw = str(data.get("logo", ""))
-                        item = await content_gallery.get_content(session, company.id, raw)
-                        if raw and (item is None or item.media_id is None):
-                            raise ValueError("Логотипом может быть добавленная вами картинка")
-                        settings = dict(company.settings or {})
-                        if item is not None:
-                            settings["logo_media_id"] = item.media_id
-                        else:
-                            settings.pop("logo_media_id", None)
-                        company.settings = settings
                     elif action == "content":
                         await session.execute(
                             select(Business.id).where(Business.id == company.id).with_for_update()
@@ -568,6 +572,32 @@ class MiniApp:
                                 raise ValueError("Неизвестное действие с планом")
                             await session.commit()
                             return json_response({"ok": True})
+                        if action == "chat" and method == "DELETE":
+                            if any(key[:2] == (user.id, company.id) for key in self.chat_progress):
+                                return json_response(
+                                    {"error": "Дождитесь ответа и повторите."}, 409
+                                )
+                            pending = await session.get(PendingDraftOptions, (user.id, company.id))
+                            if pending and pending.data.get("research_id"):
+                                editorial.discard_post_research(
+                                    (company.id, pending.data["research_id"])
+                                )
+                            await session.execute(
+                                delete(PendingDraftOptions).filter_by(
+                                    user_id=user.id, business_id=company.id
+                                )
+                            )
+                            await session.execute(
+                                delete(PendingPostAction).filter_by(
+                                    user_id=user.id, business_id=company.id
+                                )
+                            )
+                            await AgentMessageRepo(session).clear(user.id, company.id)
+                            await session.commit()
+                            for key in list(self.chat_results):
+                                if key[:2] == (user.id, company.id):
+                                    self.chat_results.pop(key, None)
+                            return json_response({"ok": True})
                         async with usage_scope(session, company.id):
                             if action == "chat":
                                 message = str(data.get("text", "")).strip()
@@ -579,7 +609,7 @@ class MiniApp:
                                             r"[0-9a-f]{12}", str(option.get("token", ""))
                                         )
                                         or not re.fullmatch(
-                                            r"[a-z_]{1,12}", str(option.get("choice", ""))
+                                            r"(?:[a-z_]{1,12}|[1-5])", str(option.get("choice", ""))
                                         )
                                     ):
                                         raise ValueError("Неверный вариант черновика")
@@ -665,6 +695,7 @@ class MiniApp:
             progress=progress,
             interactive_drafts=True,
             storage=self.container.storage,
+            session_factory=self.container.db.sessionmaker,
         )
 
     async def chat_reply(self, session, user, company, message, key, option) -> dict:
@@ -681,6 +712,14 @@ class MiniApp:
             raise LLMError("Пустой ответ чата")
         await session.commit()
         return reply
+
+    async def initialize_profiles(self, session, user, selection):
+        if selection is None:
+            selection = MiniUserState(user_id=user.id, selected_id=user.business_id)
+            session.add(selection)
+            await session.flush()
+        default = await self.ensure_default_profile(session, user, selection)
+        return selection, default
 
     async def ensure_default_profile(self, session, user, selection) -> Business:
         repo = BusinessRepo(session)
@@ -826,6 +865,19 @@ class MiniApp:
             return {"ok": True, "message": "Подключено", "label": label}
         return {"ok": False, "message": "Нет права публиковать", "label": label}
 
+    async def vk_channel_status(self, channel: Channel | None) -> dict[str, str | bool]:
+        if channel is None:
+            return {"ok": False, "message": "Сообщество не подключено"}
+        publisher = self.container.publishing.get_publisher(Platform.VK)
+        if not isinstance(publisher, VKPublisher):
+            return {"ok": False, "message": "Нет ключа подключения"}
+        try:
+            async with asyncio.timeout(5):
+                check = await publisher.check_channel(channel)
+        except TimeoutError:
+            return {"ok": False, "message": "Не удалось проверить подключение"}
+        return {"ok": check.ok, "message": "Подключено" if check.ok else check.message}
+
     async def report(self, session, company, days: int) -> web.Response:
         if not 1 <= days <= 90:
             raise ValueError("Укажите период от 1 до 90 дней")
@@ -861,6 +913,11 @@ class MiniApp:
         url = str(data.get("url", "")).strip()
         if len(url) > 2048:
             raise ValueError("Укажите адрес сайта")
+        if url:
+            try:
+                url = public_url(url if "://" in url else "https://" + url)
+            except WebsiteFetchError as exc:
+                return json_response({"error": str(exc)}, 422)
         current = (company.settings or {}).get("miniapp_website", "")
         if url == current:
             return json_response({"ok": True})
@@ -1326,7 +1383,7 @@ class MiniApp:
     async def upload_content(self, request, session, company) -> web.Response:
         """Добавляет картинку в раздел «Контент»: только изображения."""
         filename = unquote(request.headers.get("X-Filename", ""))
-        data = await self.read_photo(request)
+        data = await self.read_photo(request, keep_original=True)
         if isinstance(data, web.Response):
             return data
         try:
@@ -1336,7 +1393,7 @@ class MiniApp:
         await session.commit()
         return json_response({"ok": True, "id": item.id})
 
-    async def read_photo(self, request) -> bytes | web.Response:
+    async def read_photo(self, request, *, keep_original: bool = False) -> bytes | web.Response:
         if request.content_type != "application/octet-stream":
             return json_response({"error": "Ожидалось изображение"}, 415)
         if (
@@ -1350,6 +1407,8 @@ class MiniApp:
                 data.extend(block)
                 if len(data) > media.MAX_PHOTO_BYTES:
                     return json_response({"error": "Размер изображения должен быть до 20 МБ"}, 413)
+        if keep_original:
+            return bytes(data)
         try:
             return await asyncio.to_thread(self.photo_as_jpeg, data)
         except (UnidentifiedImageError, Image.DecompressionBombError, OSError):
@@ -1378,9 +1437,6 @@ class MiniApp:
         if not 0 < len(topic) <= 512:
             raise ValueError("Укажите тему до 512 символов")
         async with usage_scope(session, company.id):
-            web_context = await editorial.verified_post_context(
-                self.container.research_llm, self.container.settings.tz, topic
-            )
             post = await media.create_post_with_photo(
                 session,
                 self.container.llm,
@@ -1389,7 +1445,6 @@ class MiniApp:
                 photo,
                 topic,
                 source=RevisionSource("photo", author_id=user.id, request_text=topic),
-                web_context=web_context,
             )
             await approval.submit_for_approval(session, post, None, None)
         return json_response({"id": post.id})
@@ -1476,7 +1531,6 @@ class MiniApp:
 
     async def state(self, session, identity, user, companies, active) -> web.Response:
         items = []
-        chat_posts = []
         materials = []
         content = []
         plans = []
@@ -1490,6 +1544,7 @@ class MiniApp:
                 content = [
                     {
                         "id": image.id,
+                        "number": image.number,
                         "name": image.label,
                         "kind": image.kind,
                         "size": image.size,
@@ -1550,6 +1605,7 @@ class MiniApp:
             materials = [
                 {
                     "id": doc.id,
+                    "number": document_image_number(doc),
                     "name": doc.filename,
                     "status": doc.status,
                     "size": doc.size,
@@ -1558,40 +1614,7 @@ class MiniApp:
                 }
                 for doc in docs
             ]
-        history = []
-        if active:
-            messages = await AgentMessageRepo(session).last_n(user.id, 50, business_id=active.id)
-            draft_dates = {}
-            for message in messages:
-                if not message.content or message.tool_calls or message.role == MessageRole.TOOL:
-                    continue
-                entry = {"text": message.content, "me": message.role == MessageRole.USER}
-                if message.role == MessageRole.ASSISTANT and (message.name or "").startswith(
-                    "draft:"
-                ):
-                    draft_ref, _, when = message.name.removeprefix("draft:").partition("|")
-                    if draft_ref.isdecimal():
-                        entry.update(draft_id=int(draft_ref), draft_when=when or None)
-                        if when:
-                            draft_dates[int(draft_ref)] = when
-                elif message.role == MessageRole.ASSISTANT:
-                    legacy = re.match(r"Черновик №(\d+) готов", message.content)
-                    if legacy:
-                        entry["draft_id"] = int(legacy[1])
-                history.append(entry)
-            for item in items:
-                if item["suggested_at"] is None and item["id"] in draft_dates:
-                    item["suggested_at"] = draft_dates[item["id"]]
-            missing = {entry["draft_id"] for entry in history if "draft_id" in entry}
-            missing.difference_update(item["id"] for item in items)
-            if missing:
-                related = list(
-                    await session.scalars(
-                        select(Post).where(Post.business_id == active.id, Post.id.in_(missing))
-                    )
-                )
-                albums = await self.attachment_index(session, [post.id for post in related])
-                chat_posts = [self.post_preview(post, albums.get(post.id)) for post in related]
+        timeline = await self.chat_state(session, user, active, items) if active else {}
         profiles = []
         for company in sorted(
             companies, key=lambda item: not (item.settings or {}).get("miniapp_default")
@@ -1623,8 +1646,8 @@ class MiniApp:
                 "plans": plans,
                 "proposal": proposal,
                 "management": management,
-                "history": history,
-                "chat_posts": chat_posts,
+                "history": timeline.get("history", []),
+                "chat_posts": timeline.get("chat_posts", []),
                 "documents": materials,
                 "content": content,
                 "content_bytes_available": (
@@ -1632,17 +1655,8 @@ class MiniApp:
                     if active and active.owner_id == user.id
                     else 0
                 ),
-                "draft_question": await active_draft_options(
-                    self.agent_context(session, user, active)
-                )
-                if active
-                else None,
+                "draft_question": timeline.get("draft_question"),
                 "profile_chars_limit": business_profile.PROFILE_MAX_CHARS,
-                "content_logo": (
-                    f"m{(active.settings or {}).get('logo_media_id')}"
-                    if active and (active.settings or {}).get("logo_media_id")
-                    else ""
-                ),
                 "document_bytes_available": await remaining_bytes(session, active.id)
                 if active
                 else None,
@@ -1652,6 +1666,53 @@ class MiniApp:
                 "timezone": self.container.settings.timezone,
             }
         )
+
+    async def chat_state(self, session, user, active, items=()):
+        history = []
+        messages = await AgentMessageRepo(session).last_n(user.id, 50, business_id=active.id)
+        draft_dates = {}
+        for message in messages:
+            if not message.content or message.tool_calls or message.role == MessageRole.TOOL:
+                continue
+            entry = {
+                "id": message.id,
+                "text": message.content,
+                "me": message.role == MessageRole.USER,
+            }
+            name = message.name or ""
+            if message.role == MessageRole.ASSISTANT:
+                if name.startswith("question:"):
+                    entry["question_token"] = name.removeprefix("question:")
+                elif name.startswith("draft:"):
+                    draft_ref, _, when = name.removeprefix("draft:").partition("|")
+                    if draft_ref.isdecimal():
+                        entry.update(draft_id=int(draft_ref), draft_when=when or None)
+                        if when:
+                            draft_dates[int(draft_ref)] = when
+                elif legacy := re.match(r"Черновик №(\d+) готов", message.content):
+                    entry["draft_id"] = int(legacy[1])
+            history.append(entry)
+        for item in items:
+            if item["suggested_at"] is None and item["id"] in draft_dates:
+                item["suggested_at"] = draft_dates[item["id"]]
+        missing = {entry["draft_id"] for entry in history if "draft_id" in entry}
+        missing.difference_update(item["id"] for item in items)
+        related = (
+            list(
+                await session.scalars(
+                    select(Post).where(Post.business_id == active.id, Post.id.in_(missing))
+                )
+            )
+            if missing
+            else []
+        )
+        albums = await self.attachment_index(session, [post.id for post in related])
+        return {
+            "company": active.id,
+            "history": history,
+            "chat_posts": [self.post_preview(post, albums.get(post.id)) for post in related],
+            "draft_question": await active_draft_options(self.agent_context(session, user, active)),
+        }
 
     def post_preview(self, post: Post, attachments, suggested_at: datetime | None = None) -> dict:
         return {
@@ -1918,8 +1979,17 @@ class MiniApp:
             if post.updated_at.isoformat() != version:
                 raise approval.PostChangedError
             if action == "copy_to_vk":
+                if post.platform != Platform.TELEGRAM or post.status == PostStatus.REJECTED:
+                    raise ValueError("Этот пост недоступен для копирования из Telegram")
                 if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
                     raise ValueError("Сначала подключите сообщество ВКонтакте")
+                pending = await session.get(PendingPostAction, (user.id, company.id))
+                if (
+                    pending
+                    and pending.proposal.get("action") == action
+                    and pending.proposal.get("id") == post.id
+                ):
+                    await session.delete(pending)
                 copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)
                 await approval.submit_for_approval(session, copy, None, None)
             elif action == "edit_published" and post.platform == Platform.VK:
@@ -2057,8 +2127,16 @@ class MiniApp:
                     if platform == Platform.TELEGRAM and has_media
                     else hard_limit
                 )
+                if len(value) > 32_000:
+                    raise ValueError("Текст поста слишком длинный.")
                 text_length = format_text(value)[1] if platform == Platform.TELEGRAM else len(value)
-                if (not value and not has_media) or text_length > limit or len(value) > hard_limit:
+                rich = formatted_post(value) if platform == Platform.TELEGRAM else None
+                raw_limit = 32_000 if rich is not None else hard_limit
+                if (
+                    (not text_length and not has_media)
+                    or text_length > limit
+                    or len(value) > raw_limit
+                ):
                     raise ValueError(
                         f"Текст должен уложиться в {limit} символов. Посту нужен текст или вложение."
                     )
@@ -2092,21 +2170,12 @@ class MiniApp:
                 instruction = str(data["instruction"]).strip()
                 if not 0 < len(instruction) <= 2000:
                     raise ValueError("Введите правку")
-                style = await posts.post_style(session, post.id)
-                web_context = await editorial.verified_post_context(
-                    self.container.research_llm,
-                    self.container.settings.tz,
-                    post.topic,
-                    instruction=instruction,
-                    scientific=style == posts.PostStyle.SCIENTIFIC,
-                )
                 await posts.revise(
                     session,
                     self.container.llm,
                     company,
                     post,
                     instruction,
-                    web_context=web_context,
                     source=RevisionSource("manual", author_id=user.id, request_text=instruction),
                 )
                 await approval.submit_for_approval(session, post, None, None)

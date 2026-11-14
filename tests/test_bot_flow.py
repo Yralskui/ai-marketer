@@ -196,12 +196,17 @@ def last_draft_id(session: FakeSession) -> int:
 
 
 async def test_end_to_end_bot_flow(settings):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
     from app.bot.setup import BOT_COMMANDS
     from app.db.knowledge import MiniUserState
     from app.db.repositories import BusinessRepo, UserRepo
+    from app.web.miniapp import MiniApp
+    from tests.test_miniapp import BOT_TOKEN, signed_user
 
     fake = FakeSession()
-    settings.bot_token = "123456:" + "A" * 35
+    settings.bot_token = BOT_TOKEN
     settings.miniapp_public_url = "https://miniapp.example.com"
     bot = Bot(settings.bot_token, session=fake)
     container = build_container(settings, bot)
@@ -234,6 +239,29 @@ async def test_end_to_end_bot_flow(settings):
     async with container.db.sessionmaker() as session:
         (post,) = await PostRepo(session).list_for_business(business_id)
         assert post.status == PostStatus.PENDING_APPROVAL
+    assert all(type(request).__name__ != "SendPhoto" for request in fake.requests)
+    assert "Новые предложения" in fake.sent_texts(OWNER_ID)[-1]
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(OWNER_ID, token=settings.bot_token)}
+    async with TestClient(TestServer(app)) as client:
+        await client.post("/miniapp/api/select", headers=headers, json={"id": business_id})
+        response = await client.get("/miniapp/api/chat", headers=headers)
+        assert response.status == 200
+        timeline = (await response.json())["history"]
+        assert [item["text"] for item in timeline if item["me"]] == ["Напиши пост про витрины"]
+        assert [item["draft_id"] for item in timeline if "draft_id" in item] == [post.id]
+        count = len(fake.requests)
+        response = await client.post(
+            "/miniapp/api/chat",
+            headers=headers,
+            json={
+                "company": business_id,
+                "text": "Как утвердить план?",
+            },
+        )
+        assert response.status == 200
+        assert len(fake.requests) == count
     await dp.feed_update(bot, press(OWNER_ID, "publish", post.id))
     assert fake.sent_texts("@test_channel") == []
     await dp.feed_update(bot, msg(OWNER_ID, "/posts"))

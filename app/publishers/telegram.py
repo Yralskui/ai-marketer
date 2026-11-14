@@ -25,7 +25,7 @@ from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, Inpu
 
 from app.db.models import Channel, Platform, Post
 from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
-from app.publishers.telegram_text import format_text
+from app.publishers.telegram_text import format_text, formatted_post
 from app.services.posts import PLATFORM_HARD_LIMITS, TELEGRAM_CAPTION_LIMIT
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,11 @@ class TelegramPublisher(Publisher):
 
     async def publish(self, post: Post, channel: Channel) -> PublishResult:
         chat_id = channel.external_id
-        raw = post.text[: PLATFORM_HARD_LIMITS[Platform.TELEGRAM]]
+        raw = (
+            post.text
+            if formatted_post(post.text) is not None
+            else post.text[: PLATFORM_HARD_LIMITS[Platform.TELEGRAM]]
+        )
         text, length, mode = format_text(raw)
         try:
             items = getattr(post, "delivery_media", None)

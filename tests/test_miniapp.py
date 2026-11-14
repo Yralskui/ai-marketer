@@ -16,14 +16,70 @@ from app.web.miniapp import MiniApp
 BOT_TOKEN = "123456:local-placeholder"
 
 
-def signed_user(user_id: int, *, age: int = 0) -> str:
+def signed_user(user_id: int, *, age: int = 0, token: str = "123456:local-placeholder") -> str:
     payload = {
         "auth_date": str(int(time.time()) - age),
         "user": json.dumps({"id": user_id, "first_name": f"User {user_id}"}),
     }
-    secret = hmac.digest(b"WebAppData", BOT_TOKEN.encode(), "sha256")
+    secret = hmac.digest(b"WebAppData", token.encode(), "sha256")
     message = "\n".join(f"{key}={value}" for key, value in sorted(payload.items()))
     return urlencode({**payload, "hash": hmac.digest(secret, message.encode(), "sha256").hex()})
+
+
+async def test_clear_chat_only_clears_selected_company_conversation(settings, db):
+    from sqlalchemy import select
+
+    from app.db.models import AgentMessage, MessageRole
+    from app.db.publications import RevisionProvenance
+    from app.db.repositories import AgentMessageRepo, UserRepo
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(82)}
+    async with TestClient(TestServer(app)) as client:
+        base = "/miniapp/api/"
+        first = (await (await client.get(base + "state", headers=headers)).json())["active"]
+        post_id = (await create_chat_draft(client, headers, first, "Напиши пост про стекло"))[
+            "draft_id"
+        ]
+        second = (
+            await (
+                await client.post(
+                    base + "profiles", headers=headers, json={"name": "Второй профиль"}
+                )
+            ).json()
+        )["id"]
+        async with db.sessionmaker.begin() as session:
+            user = await UserRepo(session).get_by_telegram_id(82)
+            user_id = user.id
+            await AgentMessageRepo(session).add(
+                user.id, MessageRole.USER, "Другой чат", business_id=second
+            )
+        response = await client.delete(base + "chat", headers=headers, params={"company": first})
+        assert response.status == 409
+        await client.post(base + "select", headers=headers, json={"id": first})
+        response = await client.delete(base + "chat", headers=headers, params={"company": first})
+        assert response.status == 200
+        state = await (await client.get(base + "state", headers=headers)).json()
+        assert state["history"] == []
+        assert post_id in [item["id"] for item in state["posts"]]
+        async with db.sessionmaker() as session:
+            repo = AgentMessageRepo(session)
+            assert not await repo.last_n(user_id, 50, business_id=first)
+            assert [
+                message.content for message in await repo.last_n(user_id, 50, business_id=second)
+            ] == ["Другой чат"]
+            linked = await session.scalar(
+                select(AgentMessage).join(
+                    RevisionProvenance, RevisionProvenance.request_id == AgentMessage.id
+                )
+            )
+            assert linked.content == "Напиши пост про стекло"
 
 
 async def create_chat_draft(client, headers, company, text, *, image="none"):
@@ -52,6 +108,99 @@ async def create_chat_draft(client, headers, company, text, *, image="none"):
         assert (await response.json())["draft_question"] == question
     question = await choose(question, "neutral")
     return await choose(question, image)
+
+
+async def test_draft_image_picker_selects_an_uploaded_image(settings, db, tmp_path, monkeypatch):
+    from io import BytesIO
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    from PIL import Image
+
+    from app.db.models import Business, Post
+    from app.images.mock_provider import MockImageProvider
+    from app.services import content_gallery, image_references
+
+    monkeypatch.setattr(content_gallery, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(content_gallery, "USED_DIR", tmp_path / "used")
+    monkeypatch.setattr(image_references, "IMAGES_DIR", tmp_path)
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    generate = AsyncMock(wraps=MockImageProvider(tmp_path / "generated").generate)
+    monkeypatch.setattr(container.images, "generate", generate)
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(83)}
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/miniapp/api/state", headers=headers)
+        company = (await response.json())["active"]
+
+        async def send(**data):
+            response = await client.post(
+                "/miniapp/api/chat", headers=headers, json={"company": company, **data}
+            )
+            assert response.status == 200
+            return await response.json()
+
+        async def choose(question, choice):
+            return await send(
+                draft_option={"token": question["draft_options"]["token"], "choice": choice}
+            )
+
+        def choices(question):
+            return [item["id"] for item in question["draft_options"]["options"]]
+
+        style = await send(text="Напиши пост про стекло")
+        visual = await choose(style, "neutral")
+        assert choices(visual) == ["generate", "existing", "none", "cancel"]
+        assert choices(await choose(visual, "existing")) == ["back", "cancel"]
+
+        async with db.sessionmaker.begin() as session:
+            business = await session.get(Business, company)
+            buffer = BytesIO()
+            Image.new("RGB", (20, 20), "red").save(buffer, "PNG")
+            for position in range(1, 7):
+                image = await content_gallery.add_image(
+                    session, business, f"Открытка {position}.png", buffer.getvalue()
+                )
+
+        style = await send(text="Напиши пост про стекло")
+        visual = await choose(style, "neutral")
+        page = await choose(visual, "existing")
+        assert choices(page)[:5] == ["1", "2", "3", "4", "5"]
+        assert "левом верхнем углу" in page["text"]
+        second_page = await choose(page, "next")
+        assert f"1 — №{image.number} · Открытка 6" in second_page["text"]
+        result = await choose(second_page, "1")
+        assert result["draft_id"]
+        generate.assert_not_awaited()
+        async with db.sessionmaker() as session:
+            draft = await session.get(Post, result["draft_id"])
+            assert Path(draft.image_path).read_bytes() == image.path.read_bytes()
+
+        response = await client.patch(
+            "/miniapp/api/profile",
+            headers=headers,
+            json={"company": company, "visual_style": "Тёмно-синий фон и белый текст"},
+        )
+        assert response.status == 200
+        style = await send(text="Напиши пост про стекло")
+        visual = await choose(style, "neutral")
+        assert "layout" in choices(visual)
+        logo = await choose(visual, "layout")
+        assert "Выберите оригинал логотипа" in logo["text"]
+        assert "1" in choices(logo)
+        generate.assert_not_awaited()
+        result = await choose(logo, "1")
+        assert result["draft_id"]
+        generate.assert_awaited_once()
+        async with db.sessionmaker() as session:
+            draft = await session.get(Post, result["draft_id"])
+            with Image.open(draft.image_path) as rendered:
+                assert rendered.size == (1200, 1200)
 
 
 async def test_report_and_history_are_available_for_selected_company(settings, db):
@@ -710,3 +859,57 @@ async def test_legacy_default_merges_empty_bootstrap_and_resolves_public_channel
         outsider = {"Authorization": "Telegram " + signed_user(992)}
         response = await client.get(status_url, headers=outsider)
         assert response.status == 404
+
+
+async def test_profile_website_normalizes_bare_domain(settings, db, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.ingestion.website import PageText
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    container.storage = object()
+    fetch = AsyncMock(return_value=[PageText("https://example.ru", "Стекло", "О компании")])
+    monkeypatch.setattr("app.web.miniapp.fetch_site_text", fetch)
+    monkeypatch.setattr("app.web.miniapp.save_document", AsyncMock())
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(92)}
+    async with TestClient(TestServer(app)) as client:
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        company = state["active"]
+        response = await client.post(
+            "/miniapp/api/website",
+            headers=headers,
+            json={"company": company, "url": "example.ru"},
+        )
+        assert response.status == 200, await response.text()
+        fetch.assert_awaited_once_with("https://example.ru", request_timeout=6)
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        assert state["profiles"][0]["website"] == "https://example.ru"
+
+
+async def test_private_demo_allows_only_listed_telegram_ids(settings, db):
+    from app.db.repositories import UserRepo
+
+    settings.bot_token = BOT_TOKEN
+    settings.allowed_user_ids = "111,112"
+    settings.telegram_allowlist_only = True
+    settings.miniapp_open_signup = True
+    async with db.sessionmaker.begin() as session:
+        await UserRepo(session).get_or_create(999, "Уже зарегистрирован")
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+    async with TestClient(TestServer(app)) as client:
+        for telegram_id, expected in ((111, 200), (112, 200), (999, 403), (123, 403)):
+            response = await client.get(
+                "/miniapp/api/state",
+                headers={"Authorization": "Telegram " + signed_user(telegram_id)},
+            )
+            assert response.status == expected

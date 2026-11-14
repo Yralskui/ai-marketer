@@ -1,11 +1,11 @@
 """Краткая веб-справка и один разбор на опубликованный пост."""
 
+import asyncio
 import json
+import logging
 import re
-from collections.abc import Callable
 from datetime import timedelta
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -15,59 +15,88 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.agent.prompts import render_prompt
 from app.db.models import Post, PostStatus
 from app.db.publications import PostCritique, PostSnapshot
-from app.llm.base import LLMError, LLMProvider
+from app.llm.base import LLMError
+from app.publishers.telegram_text import plain_text
 from app.services.business_profile import get_profile
+from app.services.usage import usage_scope
 from app.utils.time import to_local, utcnow
 
 EXTERNAL_FACTS = re.compile(
     r"\b(?:закон(?:а|е|ы|ов|ом|одатель\w*)?|законопроект\w*|правов\w*|"
-    r"гост(?:ы|а|у|ом)?|норматив\w*|новост\w*|исследовани\w*|научн\w*|"
+    r"гост(?:ы|а|у|ом)?|норматив\w*|"
+    r"новост\w*\s+(?:рынка|отрасли|мира)|исследовани\w*|научн\w*|"
     r"уч[её]ны\w*|метаанализ\w*|статистик\w*|вступил\w*\s+в\s+силу|"
     r"фактчек\w*|проверь\s+факт\w*|"
-    r"по\s+(?:последним|свежим)\s+данным)\b",
+    r"по\s+(?:последним|свежим)\s+данным|"
+    r"(?:свеж\w*|актуальн\w*|последн\w*)\s+новост\w*)\b",
     re.IGNORECASE,
 )
+EXPLICIT_SEARCH = re.compile(
+    r"\b(?:(?:за|по)гугл\w*|фактчек\w*|"
+    r"(?:проверь\w*|найди\w*|поищи\w*)[^.!?\n]{0,90}"
+    r"(?:источник\w*|факт\w*|в\s+интернете|в\s+сети))\b",
+    re.IGNORECASE,
+)
+log = logging.getLogger(__name__)
+_searches: dict[tuple[int, str], asyncio.Task[str]] = {}
+SEARCH_TIMEOUT = 20
+SEARCH_RESULT_TTL = 120
 
 
-class UnverifiedPostFacts(ValueError):
-    """Нужный внешний факт пока не подтверждён."""
+def wants_background_research(request: str, *, scientific: bool = False) -> bool:
+    return bool(scientific or requested_web_search(request) or EXTERNAL_FACTS.search(request))
 
 
-async def verified_post_context(
-    llm: LLMProvider | None,
-    tz: ZoneInfo,
-    topic: str,
-    *,
-    question: str = "",
-    scientific: bool = False,
-    instruction: str = "",
-    progress: Callable[[str], None] | None = None,
-) -> str:
-    if not (
-        question or scientific or EXTERNAL_FACTS.search(topic) or EXTERNAL_FACTS.search(instruction)
+def requested_web_search(request: str) -> bool:
+    return bool(EXPLICIT_SEARCH.search(request))
+
+
+def start_post_research(key, llm, session_factory, tz, topic, request, *, scientific=False):
+    if (
+        key in _searches
+        or llm is None
+        or session_factory is None
+        or not wants_background_research(request, scientific=scientific)
     ):
+        return
+
+    async def search():
+        try:
+            async with session_factory() as session, usage_scope(session, key[0]):
+                async with asyncio.timeout(SEARCH_TIMEOUT):
+                    brief = await research(llm, tz, topic, request[:400] or topic[:400])
+                await session.commit()
+                return brief_context(brief)
+        except (LLMError, TimeoutError):
+            return ""
+        except Exception:
+            log.exception("Не удалось получить необязательную веб-справку")
+            return ""
+
+    task = asyncio.create_task(search())
+    _searches[key] = task
+
+    def expire():
+        if _searches.get(key) is task:
+            discard_post_research(key)
+
+    asyncio.get_running_loop().call_later(SEARCH_RESULT_TTL, expire)
+
+
+def take_post_research(key) -> str:
+    task = _searches.pop(key, None)
+    if not task:
         return ""
-    question = question or (
-        "Проверь центральные факты, терминологию и оговорки для публикации"
-        + (
-            f". Уточнение задачи: {instruction[:240]}"
-            if instruction
-            else f" по теме: {topic[:280]}"
-        )
-    )
-    if progress is not None:
-        progress("search")
-    try:
-        brief = await research(llm, tz, topic, question)
-    except LLMError as exc:
-        raise UnverifiedPostFacts(
-            "Поиск сейчас недоступен. Повторите запрос или пришлите источник для проверки."
-        ) from exc
-    if not brief or not brief["summary"] or not brief["sources"]:
-        raise UnverifiedPostFacts(
-            "Не нашёл подтверждения для этого поста. Пришлите ссылку на источник или уточните факт."
-        )
-    return brief_context(brief)
+    if not task.done():
+        task.cancel()
+        return ""
+    return "" if task.cancelled() else task.result()
+
+
+def discard_post_research(key) -> None:
+    task = _searches.pop(key, None)
+    if task and not task.done():
+        task.cancel()
 
 
 class Critique(BaseModel):
@@ -183,7 +212,7 @@ async def critique(session, llm, business, post, tz):
         "компания": business.name,
         "описание": get_profile(business).description[:600],
         "тема": post.topic,
-        "текст": post.text[:4100],
+        "текст": plain_text(post.text)[:4100],
         "публикация": to_local(post.published_at, tz).isoformat() if post.published_at else None,
         "замеры": [
             [to_local(p.hour, tz).isoformat(), p.views, p.forwards] for p in reversed(selected)

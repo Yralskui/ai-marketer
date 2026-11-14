@@ -58,6 +58,14 @@ class PendingPostAction(Base):
     proposal: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
+class ChatHistoryClear(Base):
+    __tablename__ = "chat_history_clears"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), primary_key=True)
+    through_id: Mapped[int]
+
+
 class HiddenGeneratedImage(Base):
     __tablename__ = "hidden_generated_images"
 

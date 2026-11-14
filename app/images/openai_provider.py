@@ -6,6 +6,7 @@ import asyncio
 import logging
 from base64 import b64decode
 from binascii import Error as Base64Error
+from contextlib import ExitStack
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,14 +32,23 @@ class OpenAIImageProvider(ImageProvider):
         )
 
     async def generate(self, prompt: str, *, size: tuple[int, int] = (1024, 1024)) -> Path:
+        return await self._request(prompt, size, [])
+
+    async def edit(self, prompt: str, references: list[Path]) -> Path:
+        return await self._request(prompt, (1024, 1024), references)
+
+    async def _request(self, prompt: str, size: tuple[int, int], references: list[Path]) -> Path:
         try:
-            async with asyncio.timeout(self.timeout):
-                result = await self.client.images.generate(
-                    model=self.model,
-                    prompt=prompt,
-                    size=f"{size[0]}x{size[1]}",
-                    n=1,
-                )
+            options = dict(model=self.model, prompt=prompt, size=f"{size[0]}x{size[1]}", n=1)
+            with ExitStack() as files:
+                async with asyncio.timeout(self.timeout):
+                    if references:
+                        result = await self.client.images.edit(
+                            image=[files.enter_context(path.open("rb")) for path in references],
+                            **options,
+                        )
+                    else:
+                        result = await self.client.images.generate(**options)
             encoded = result.data[0].b64_json if result.data else None
             if not encoded:
                 raise ImageGenerationError("OpenAI вернул пустое изображение")
@@ -47,9 +57,7 @@ class OpenAIImageProvider(ImageProvider):
             await asyncio.to_thread(path.write_bytes, data)
         except (TimeoutError, APITimeoutError) as exc:
             log.warning("Images API: ожидание прервано через %s с", self.timeout)
-            raise ImageGenerationTimeout(
-                "Генератор изображения не ответил вовремя. Черновик сохранён без картинки."
-            ) from exc
+            raise ImageGenerationTimeout("Генератор изображения не ответил вовремя.") from exc
         except (OpenAIError, Base64Error, OSError) as exc:
             log.warning(
                 "Images API: %s (status=%s, request_id=%s)",

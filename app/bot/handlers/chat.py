@@ -7,17 +7,19 @@ from aiogram.enums import ChatType
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import AgentContext
-from app.agent.harness import answer, choose_draft_option
+from app.agent.harness import active_draft_options_for, answer, choose_draft_option
 from app.bot.keyboards import miniapp_keyboard
 from app.container import AppContainer
-from app.db.knowledge import MiniUserState, PendingPostAction
+from app.db.knowledge import MiniUserState
 from app.db.models import User
 from app.llm.base import LLMError
 from app.services.accounts import accessible_profiles
 from app.services.usage import BudgetExceededError, usage_scope
+from app.web.miniapp import MiniApp
 
 router = Router(name="chat")
 router.message.filter(F.chat.type == ChatType.PRIVATE)
@@ -46,6 +48,16 @@ async def on_text(
     pending = data.get("pending_task")
     profiles = await accessible_profiles(session, db_user)
     selection = await session.get(MiniUserState, db_user.id)
+    if not profiles:
+        if session.get_bind().dialect.name == "postgresql":
+            await session.execute(
+                sql_text("SELECT pg_advisory_xact_lock(:user_key)"),
+                {"user_key": -db_user.telegram_id},
+            )
+        selection = await session.get(MiniUserState, db_user.id, populate_existing=True)
+        selection, _ = await MiniApp(container).initialize_profiles(session, db_user, selection)
+        await session.commit()
+        profiles = await accessible_profiles(session, db_user)
     by_id = {profile.id: profile for profile in profiles}
     named = [
         profile
@@ -56,9 +68,11 @@ async def on_text(
     if pending and business is not None:
         text = pending
     elif not named and not pending:
-        business = by_id.get(data.get("dialog_profile"))
-        if business is None and selection:
-            business = by_id.get(selection.selected_id)
+        previous = by_id.get(data.get("dialog_profile"))
+        if previous and await active_draft_options_for(session, db_user.id, previous.id):
+            business = previous
+        else:
+            business = (by_id.get(selection.selected_id) if selection else None) or previous
         if business is None and len(profiles) == 1:
             business = profiles[0]
     if business is None:
@@ -83,6 +97,7 @@ async def on_text(
         research_llm=container.research_llm,
         interactive_drafts=True,
         storage=container.storage,
+        session_factory=container.db.sessionmaker,
     )
     try:
         async with (
@@ -103,7 +118,7 @@ async def on_text(
     await send_result(message, session, ctx, container, result, selection)
 
 
-@router.callback_query(F.data.regexp(r"^draftopt:[0-9]+:[0-9a-f]{12}:[a-z_]{1,12}$"))
+@router.callback_query(F.data.regexp(r"^draftopt:[0-9]+:[0-9a-f]{12}:(?:[a-z_]{1,12}|[1-5])$"))
 async def on_draft_option(
     callback: CallbackQuery, session: AsyncSession, db_user: User, container: AppContainer, bot: Bot
 ) -> None:
@@ -135,6 +150,7 @@ async def on_draft_option(
         chat_id=message.chat.id,
         interactive_drafts=True,
         storage=container.storage,
+        session_factory=container.db.sessionmaker,
     )
     try:
         async with (
@@ -158,35 +174,49 @@ async def send_result(message, session, ctx, container, result, selection):
     reply = escape(result["text"])
     if question := result.get("draft_options"):
         await session.commit()
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    text=option["label"],
-                    callback_data=f"draftopt:{ctx.business_id}:{question['token']}:{option['id']}",
-                )
-            ]
-            for option in question["options"]
-        ]
+        digits = []
+        buttons = []
+        for option in question["options"]:
+            button = InlineKeyboardButton(
+                text=option["label"],
+                callback_data=f"draftopt:{ctx.business_id}:{question['token']}:{option['id']}",
+            )
+            if option["id"].isdigit():
+                digits.append(button)
+            else:
+                buttons.append([button])
+        if digits:
+            buttons.insert(0, digits)
+        if question.get("stage") in {"pick_image", "pick_logo"}:
+            if url := container.settings.telegram_miniapp_url:
+                buttons.extend(miniapp_keyboard(url).inline_keyboard)
+            reply += "\nВ Mini App откройте «Профиль» → ✎ у компании. Номера видны в «Файлах профиля» и «Контенте»."
         await message.answer(reply, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         return
-    if proposal := result.get("proposal"):
-        await session.merge(
-            PendingPostAction(
-                user_id=ctx.user_id,
-                business_id=ctx.business_id,
-                proposal=proposal,
-            )
-        )
-        await session.commit()
     if result.get("proposal") or ctx.created_post_ids:
-        instructions = "\nПроверьте действие в Mini App."
-        if selection is None or selection.selected_id != ctx.business_id:
-            instructions = "\nВ Mini App выберите эту компанию и откройте «Главная»."
+        route = (
+            "«Главная» → «Запрос из чата»"
+            if result.get("proposal") and not ctx.created_post_ids
+            else "«Главная» → «Новые предложения» или вкладка «Чат»"
+        )
+        profile = (
+            "Выберите профиль «" + escape(ctx.business.name) + "». "
+            if selection is None or selection.selected_id != ctx.business_id
+            else ""
+        )
+        instructions = "\nВ Mini App: " + profile + route + "."
         await open_app(
             message,
             container,
             escape(ctx.business.name) + "\n" + reply + instructions,
         )
+    elif (
+        "главной" in reply.casefold()
+        or "мини" in reply.casefold()
+        or "mini app" in reply.casefold()
+        or "редакторе профиля" in reply.casefold()
+    ):
+        await open_app(message, container, reply)
     else:
         await message.answer(reply)
 

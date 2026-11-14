@@ -318,3 +318,9 @@ class MeteredImages(ImageProvider):
         path = await self.inner.generate(prompt, size=size)
         await self.recorder.record(UsageKind.IMAGE, provider=self.inner.name, images=1)
         return path
+
+    async def edit(self, prompt: str, references: list[Path]) -> Path:
+        await self.recorder.ensure_budget()
+        path = await self.inner.edit(prompt, references)
+        await self.recorder.record(UsageKind.IMAGE, provider=self.inner.name, images=1)
+        return path

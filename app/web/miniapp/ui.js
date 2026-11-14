@@ -28,11 +28,16 @@ const notice = document.querySelector("#notice");
 const sheet = document.querySelector("#sheet");
 const sheetBody = document.querySelector("#sheet-body");
 const refresh = document.querySelector("#refresh");
+const chatMenu = document.querySelector("#chat-menu");
 const chatLogs = new Map();
+const chatDrafts = new Map();
+const tabScroll = new Map();
+const profileScroll = new Map();
 let state;
 let tab = "profile";
 let initial = true;
 let sending = false;
+let chatSync;
 let pendingChat;
 const readCache = new Map();
 const readRequests = new Map();
@@ -87,6 +92,29 @@ function chatIcon(path) {
 for (const node of document.querySelectorAll("[data-icon]")) {
     node.append(icon(node.dataset.icon));
 }
+
+chatMenu.append(chatIcon("M12 5h.01M12 12h.01M12 19h.01"));
+chatMenu.addEventListener("click", () => {
+    const company = state.active;
+    const body = el("section");
+    body.append(button("Очистить чат", () => {
+        body.replaceChildren(
+            el("p","История чата этого профиля будет очищена. Посты и расписание сохранятся."),
+            button("Отмена", () => sheet.close(), "plain"),
+            button("Очистить", async () => {
+                await api("chat?company=" + company,"DELETE");
+                chatLogs.set(company,[]);
+                if (state.active === company) {
+                    state.history = [];
+                    state.draft_question = null;
+                    if (tab === "chat") chat({follow:true});
+                }
+                sheet.close();
+            },"danger"),
+        );
+    },"danger"));
+    showSheet("Действия чата",body);
+});
 
 function button(label, handler, style) {
     const node = el("button", label, style);
@@ -166,17 +194,48 @@ function cachedApi(path, ttl = 15000) {
     return request;
 }
 
-async function load() {
+async function load({syncChat = !sending} = {}) {
     state = await api("state","GET",undefined,AbortSignal.timeout(20000));
-    if (state.active && !sending) chatLogs.set(state.active, state.history || []);
+    if (state.active && syncChat) chatLogs.set(state.active, state.history || []);
     if (initial && state.active) tab = "home";
     initial = false;
     if (!state.active) tab = "profile";
     render();
 }
 
-function showSheet(title, content, subtitle = "", back = null) {
+
+async function syncChatHistory() {
+    if (!state?.active || tab !== "chat" || sending || document.hidden || chatSync) return;
+    const company = state.active;
+    const version = cacheVersion;
+    chatSync = api("chat","GET",undefined,AbortSignal.timeout(7500));
+    try {
+        const result = await chatSync;
+        if (version !== cacheVersion || state.active !== company || result.company !== company || sending || tab !== "chat") return;
+        const previous = chatLogs.get(company) || [];
+        if (JSON.stringify(previous) === JSON.stringify(result.history) &&
+            JSON.stringify(state.chat_posts) === JSON.stringify(result.chat_posts) &&
+            state.draft_question?.draft_options.token === result.draft_question?.draft_options.token) return;
+        chatLogs.set(company,result.history);
+        state.chat_posts = result.chat_posts;
+        state.draft_question = result.draft_question;
+        chat();
+    } catch { /* A later refresh retries if Telegram switches networks. */ }
+    finally { chatSync = undefined; }
+}
+document.addEventListener("visibilitychange",syncChatHistory);
+window.addEventListener("focus",syncChatHistory);
+setInterval(syncChatHistory,10000);
+
+function preserveSheetScroll(update) {
+    const top = sheet.scrollTop;
+    update();
+    sheet.scrollTop = top;
+}
+
+function showSheet(title, content, subtitle = "", back = null, top = 0) {
     sheetView++;
+    sheet.classList.remove("updating");
     sheetMotion?.cancel();
     sheetDrag = null;
     sheet.style.transform = "";
@@ -189,7 +248,7 @@ function showSheet(title, content, subtitle = "", back = null) {
     sheetBody.setAttribute("aria-busy",String(content.classList.contains("loading-content")));
     sheetBody.replaceChildren(content);
     if (!sheet.open) sheet.showModal();
-    sheet.scrollTop = 0;
+    sheet.scrollTop = top;
 }
 
 function loadingContent(kind) {
@@ -206,22 +265,41 @@ function loadingContent(kind) {
     return content;
 }
 
-async function loadSheet(title, kind, read, renderContent, {subtitle = "", back = null} = {}) {
-    showSheet(title, loadingContent(kind), subtitle, back);
+async function loadSheet(title, kind, read, renderContent, {subtitle = "", back = null, top} = {}) {
+    const inPlace = sheet.open && document.querySelector("#sheet-title").textContent === title &&
+        !sheetBody.firstElementChild?.classList.contains("loading-content");
+    const offset = top ?? (inPlace ? sheet.scrollTop : 0);
+    if (inPlace) {
+        sheetView++;
+        sheetBody.setAttribute("aria-busy","true");
+        sheet.classList.add("updating");
+    } else showSheet(title, loadingContent(kind), subtitle, back);
     const view = sheetView;
     const company = state.active;
     const isCurrent = () => sheet.open && sheetView === view && state.active === company;
     try {
         const data = await read();
-        if (isCurrent()) renderContent(data);
+        if (isCurrent()) {
+            const position = top ?? (inPlace ? sheet.scrollTop : offset);
+            renderContent(data);
+            sheet.scrollTop = position;
+        }
     } catch (error) {
         if (!isCurrent()) return;
-        const panel = el("div",undefined,"loading-error");
         const message = el("p",error.message || "Не удалось загрузить данные.","sheet-error");
         message.setAttribute("role","alert");
-        panel.append(message,button("Повторить",() => loadSheet(title,kind,read,renderContent,{subtitle,back}),"primary"));
-        sheetBody.setAttribute("aria-busy","false");
-        sheetBody.replaceChildren(panel);
+        const panel = el("div",undefined,"loading-error");
+        panel.append(message,button("Повторить",() => loadSheet(title,kind,read,renderContent,{subtitle,back,top:offset}),"primary"));
+        preserveSheetScroll(() => {
+            sheetBody.querySelector(":scope > .loading-error")?.remove();
+            if (inPlace) sheetBody.prepend(panel);
+            else sheetBody.replaceChildren(panel);
+        });
+    } finally {
+        if (isCurrent()) {
+            sheetBody.setAttribute("aria-busy","false");
+            sheet.classList.remove("updating");
+        }
     }
 }
 
@@ -317,10 +395,12 @@ function openTab(next, dragged = 0) {
         if (outgoingMessages) outgoingMessages.scrollTop = screen.querySelector(".messages").scrollTop;
     }
     page.style.transform = "";
+    tabScroll.set(state.active + ":" + tab,screen.scrollTop);
     tab = next;
     feedback("");
     render();
-    if (next !== "chat") screen.scrollTop = 0;
+    if (next !== "chat") screen.scrollTop = tabScroll.get(state.active + ":" + next) ?? 0;
+    else void syncChatHistory();
     if (animate) {
         const motion = {duration:dragged ? 125 : 110,easing:"cubic-bezier(.28,0,.22,1)"};
         const slide = x => ({transform:"translate3d(" + x + "px,0,0)"});
@@ -433,6 +513,7 @@ function render() {
     app.dataset.tab = tab;
     const mark = document.querySelector("#assistant-mark");
     mark.hidden = tab !== "chat";
+    chatMenu.hidden = tab !== "chat";
     page.dataset.tab = tab;
     screen.dataset.screen = tab;
     tabs.hidden = false;
@@ -441,7 +522,7 @@ function render() {
         if (item.dataset.tab === tab) item.setAttribute("aria-current", "page");
         else item.removeAttribute("aria-current");
     }
-    screen.replaceChildren();
+    if (tab !== "chat") screen.replaceChildren();
     if (tab === "home") home();
     else if (tab === "chat") chat();
     else profile(company);
@@ -577,15 +658,17 @@ function home() {
     radar.append(offer);
     if (state.proposal) {
         const proposal = state.proposal;
-        const labels = {publish:"Опубликовать", schedule:"Запланировать", cancel:"Снять с расписания"};
-        const request = section("Запрос из Telegram");
+        const labels = {publish:"Опубликовать", schedule:"Запланировать", cancel:"Снять с расписания", copy_to_vk:"Скопировать во ВКонтакте"};
+        const request = section("Запрос из чата");
         request.append(el("p", labels[proposal.action] + " «" + proposal.topic + "»"));
         if (proposal.when) request.append(el("p", new Date(proposal.when).toLocaleString("ru-RU"), "muted"));
         request.append(button("Подтвердить действие", async () => {
             const result = await api("post", "POST", proposal);
             await load();
             if (result.simulated) feedback("Тестовая отправка. Пост в канал не ушёл.");
+            else if (proposal.action === "copy_to_vk") feedback("Копия для ВКонтакте ждёт согласования.");
         }, "primary"));
+        radar.append(request);
     }
     const departments = section("Отделы");
     departments.className = "apple-section";
@@ -623,27 +706,6 @@ function home() {
     if (state.plans?.length) showPlans();
 }
 
-function appendPostText(container, text) {
-    const tokens = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()]+)|\*\*([^*\n]+)\*\*|_([^_\n]+)_/g;
-    let end = 0;
-    for (const match of String(text || "").matchAll(tokens)) {
-        container.append(document.createTextNode(text.slice(end, match.index)));
-        if (match[1] || match[3]) {
-            const url = match[2] || match[3].replace(/[.,!?:;]+$/, "");
-            const link = el("a", match[1] || url);
-            link.href = url;
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-            container.append(link);
-            if (match[3]) container.append(document.createTextNode(match[3].slice(url.length)));
-        } else {
-            container.append(el(match[4] ? "strong" : "em", match[4] || match[5]));
-        }
-        end = match.index + match[0].length;
-    }
-    container.append(document.createTextNode((text || "").slice(end)));
-}
-
 const platformTitle = {telegram:"Telegram", vk:"VK", max:"MAX"};
 function postMedia(post) {
     const revision = post.revision ? "&revision=" + post.revision : "";
@@ -653,7 +715,42 @@ function postMedia(post) {
     return post.has_image ? [{type:"image", name:"Фото", key:"0", url:base + version}] : [];
 }
 
-const postImages = new Map();
+const previewCache = new Map();
+const previewCacheLimit = 48 * 1024 * 1024;
+let previewCacheBytes = 0;
+
+function fetchPreview(key, url) {
+    const saved = previewCache.get(key);
+    if (saved) {
+        previewCache.delete(key);
+        previewCache.set(key,saved);
+        return saved.promise;
+    }
+    const entry = {size:0};
+    entry.promise = fetch("/miniapp/api/" + url,{
+        headers:{Authorization:"Telegram " + initData},signal:AbortSignal.timeout(20000),
+    }).then(response => response.ok ? response.blob() : null).catch(() => null).then(blob => {
+        if (previewCache.get(key) !== entry) return blob;
+        if (!blob || blob.size > previewCacheLimit) {
+            previewCache.delete(key);
+            return blob;
+        }
+        entry.size = blob.size;
+        previewCacheBytes += entry.size;
+        while (previewCacheBytes > previewCacheLimit || previewCache.size > 72) {
+            forgetPreview(previewCache.keys().next().value);
+        }
+        return blob;
+    });
+    previewCache.set(key,entry);
+    return entry.promise;
+}
+
+function forgetPreview(key) {
+    const entry = previewCache.get(key);
+    if (entry) previewCacheBytes -= entry.size;
+    previewCache.delete(key);
+}
 
 function loadMedia(node, item) {
     function display(blob) {
@@ -669,20 +766,8 @@ function loadMedia(node, item) {
         display(item.file);
         return;
     }
-    const key = state.active + ":" + item.url;
-    let source = item.type === "image" ? postImages.get(key) : null;
-    if (!source || source.expires <= Date.now()) {
-        const blob = fetch("/miniapp/api/" + item.url, {headers:{Authorization:"Telegram " + initData}})
-            .then(response => response.ok ? response.blob() : null)
-            .catch(() => null);
-        source = {blob,expires:Date.now() + 30000};
-        if (item.type === "image") {
-            postImages.set(key,source);
-            if (postImages.size > 24) postImages.delete(postImages.keys().next().value);
-            blob.then(image => { if ((!image || image.size > 2_000_000) && postImages.get(key) === source) postImages.delete(key); });
-        }
-    }
-    source.blob
+    const key = "post:" + state.active + ":" + item.url;
+    fetchPreview(key,item.url)
         .then(blob => {
             if (blob && node.isConnected) display(blob);
         }).catch(() => {});
@@ -733,7 +818,7 @@ function telegramPost(post, attachments = postMedia(post), remove = null) {
         bubble.append(group);
     }
     if (post.text) {
-        const copy = el("p", undefined, "tg-copy");
+        const copy = el("div", undefined, "tg-copy");
         appendPostText(copy, post.text);
         bubble.append(copy);
     }
@@ -775,7 +860,10 @@ function draftActions(post, options = {}) {
         }
     }
     actions.append(button("Отклонить",() => decide("reject"),"plain"),
-        button("Редактировать",() => editPost(post,options.refresh),"plain"),
+        button("Редактировать",() => {
+            const top = sheet.scrollTop;
+            editPost(post, options.refresh ? () => options.refresh(top) : undefined);
+        },"plain"),
         button("Принять",() => decide("approve"),"primary"));
     if (scheduled) {
         const hint = el("p","Публикация · " + historyTime(when),"draft-schedule-hint");
@@ -791,83 +879,236 @@ function draftActions(post, options = {}) {
     return actions;
 }
 
-function offersSheet() {
+function offersSheet(top = 0) {
     const body = el("section");
     const drafts = state.posts.filter(post => reviewStatuses.includes(post.status));
     if (!drafts.length) body.append(el("p", "Пока нет черновиков на согласование.", "muted"));
     for (const post of drafts) {
         const card = el("article", undefined, "review-card");
-        card.append(telegramPost(post),draftActions(post,{refresh:offersSheet}));
+        card.append(telegramPost(post),draftActions(post,{refresh:top => offersSheet(top ?? sheet.scrollTop)}));
         body.append(card);
     }
-    showSheet("Новые предложения", body);
+    showSheet("Новые предложения", body, "", null, top);
 }
 
 function editPost(post, back = () => sheet.close()) {
     const company = state.profiles.find(item => item.id === state.active);
-    const body = el("section");
+    const body = el("section", undefined, "post-editor");
+    const preview = el("details", undefined, "editor-preview");
+    preview.open = true;
+    preview.append(el("summary","Предпросмотр"));
     const host = el("div");
-    const field = el("label", "Текст поста");
-    const input = el("textarea");
-    input.value = post.text;
-    input.maxLength = post.platform === "vk" ? 15000 : 4096;
-    field.append(input);
+    preview.append(host);
+    const formatted = post.platform === "telegram";
+    const field = el("p", "Текст поста", "editor-label");
+    field.id = "post-editor-label";
+    const counter = el("p",undefined,"editor-counter muted");
+    counter.id = "post-editor-counter";
+    const input = el(formatted ? "div" : "textarea");
+    input.setAttribute("aria-describedby",counter.id);
+    input.setAttribute("aria-labelledby",field.id);
+    const hardLimit = {vk:15000,telegram:4096,max:4000}[post.platform] || 4096;
+    if (formatted) {
+        input.className = "post-text-input";
+        input.contentEditable = "true";
+        input.setAttribute("role","textbox");
+        input.setAttribute("aria-multiline","true");
+        renderPostRuns(input,parsePostRuns(post.text),"edit");
+    } else {
+        input.value = post.text;
+        input.rows = 5;
+        input.maxLength = hardLimit;
+    }
     const attachments = postMedia(post);
-    let changed = false;
+    const originalOrder = attachments.map(item => item.key);
+    const canEditMedia = company.editable;
+    const runs = () => formatted ? readPostRuns(input) : [{text:input.value,marks:{}}];
+    const plain = () => runs().map(run => run.text).join("").trim();
+    const original = formatted ? serializePostRuns(runs()) : input.value;
+    function textForSave() {
+        if (!formatted) return input.value;
+        if (!plain()) return "";
+        const markup = serializePostRuns(runs());
+        return markup === original ? post.text : markup;
+    }
+    function mediaChanged() {
+        return attachments.length !== originalOrder.length ||
+            attachments.some((item,index) => item.file || item.key !== originalOrder[index]);
+    }
+    function updateStatus() {
+        const limit = formatted && attachments.length ? 1024 : hardLimit;
+        const length = Array.from(plain()).length;
+        const overLimit = length > limit || textForSave().length > (formatted ? 32000 : hardLimit);
+        counter.textContent = length + " / " + limit + (formatted && attachments.length ? " · подпись" : "");
+        counter.classList.toggle("over-limit",overLimit);
+        save.disabled = overLimit || (!length && !attachments.length) ||
+            (textForSave() === post.text && !mediaChanged());
+    }
     function redraw() {
-        host.replaceChildren(telegramPost({...post,text:input.value}, attachments, company.editable ? index => {
-            attachments.splice(index, 1);
-            changed = true;
-            redraw();
-        } : null));
-        if (company.editable && attachments.length > 1) showOrder();
-        else order.replaceChildren();
+        preserveSheetScroll(() => {
+            host.replaceChildren(telegramPost({...post,text:textForSave()}, attachments, canEditMedia ? index => {
+                attachments.splice(index, 1);
+                redraw();
+            } : null));
+            if (canEditMedia && attachments.length > 1) showOrder();
+            else order.replaceChildren();
+            updateStatus();
+        });
     }
     let copyTimer;
-    input.addEventListener("input", () => {
+    function refreshText() {
+        updateStatus();
         clearTimeout(copyTimer);
         copyTimer = setTimeout(() => {
-            let copy = host.querySelector(".tg-copy");
-            if (!copy) {
-                copy = el("p", undefined, "tg-copy");
-                host.querySelector(".tg-meta").before(copy);
-            }
-            copy.replaceChildren();
-            appendPostText(copy, input.value);
+            if (!host.isConnected) return;
+            preserveSheetScroll(() => {
+                let copy = host.querySelector(".tg-copy");
+                if (!copy) {
+                    copy = el("div", undefined, "tg-copy");
+                    host.querySelector(".tg-meta").before(copy);
+                }
+                renderPostRuns(copy,runs(),"preview");
+            });
         }, 60);
-    });
-    const toolbar = el("div", undefined, "row");
-    for (const [label, mark] of [["Жирный","**"],["Курсив","_"]]) {
-        toolbar.append(button(label, () => {
-            const start = input.selectionStart;
-            const end = input.selectionEnd;
-            input.setRangeText(mark + (input.value.slice(start,end) || "текст") + mark,start,end,"end");
-            input.dispatchEvent(new Event("input"));
-            input.focus();
-        }, "plain"));
     }
-    const linkPanel = el("div", undefined, "row");
-    linkPanel.hidden = true;
-    const linkAddress = el("input");
-    linkAddress.type = "url";
-    linkAddress.placeholder = "https://…";
-    linkAddress.setAttribute("aria-label", "Адрес ссылки");
-    let selection;
-    toolbar.append(button("Ссылка", () => {
-        selection = [input.selectionStart, input.selectionEnd];
-        linkPanel.hidden = false;
-        linkAddress.focus();
-    }, "plain"));
-    linkPanel.append(linkAddress, button("Вставить", () => {
-        const url = new URL(linkAddress.value);
-        if (!["http:","https:"].includes(url.protocol)) throw new Error("Укажите ссылку http или https.");
-        const label = input.value.slice(...selection).replace(/[\]\n]/g," ") || "Ссылка";
-        input.setRangeText("[" + label + "](" + url.href.replace(/[()]/g,encodeURIComponent) + ")",...selection,"end");
-        input.dispatchEvent(new Event("input"));
+    input.addEventListener("input",refreshText);
+    body.append(field,input);
+    if (formatted) {
+        const toolbar = el("div", undefined, "editor-toolbar");
+        toolbar.setAttribute("role","group");
+        toolbar.setAttribute("aria-label","Форматирование выделенного текста");
+        const hint = el("p","Выделите текст, чтобы применить форматирование.","muted");
+        const linkPanel = el("div", undefined, "row");
         linkPanel.hidden = true;
-        input.focus();
-    }));
-    body.append(host, field, toolbar, linkPanel);
+        const linkAddress = el("input");
+        linkAddress.type = "url";
+        linkAddress.placeholder = "https://…";
+        linkAddress.setAttribute("aria-label","Адрес ссылки");
+        const insertLink = button("Применить",() => {
+            const url = postLink(linkAddress.value.trim());
+            if (!url) throw new Error("Введите полный адрес ссылки, например https://example.com.");
+            applyLink(url);
+        },"primary");
+        const removeLink = button("Убрать ссылку",() => applyLink(""),"plain");
+        let selected;
+        let linkTarget;
+        let dismissed;
+        const sameSelection = (first,second) => first && second &&
+            first[0] === second[0] && first[1] === second[1];
+        function renderSelection(formattedRuns,range) {
+            renderPostRuns(input,formattedRuns,"edit");
+            input.focus({preventScroll:true});
+            restorePostSelection(input,...range);
+            refreshText();
+        }
+        function closeLinkPanel() {
+            linkTarget = null;
+            linkPanel.hidden = true;
+        }
+        function showLinkPanel(range,focus = false) {
+            const links = postLinks(runs(),range);
+            const existing = links.length === 1 ? links[0].href : "";
+            linkTarget = range;
+            linkAddress.value = existing;
+            removeLink.hidden = !links.length;
+            linkPanel.hidden = false;
+            if (focus) {
+                linkAddress.focus({preventScroll:true});
+                linkAddress.select();
+            }
+        }
+        function applyLink(href) {
+            if (!linkTarget) return;
+            const range = linkTarget;
+            const updated = replacePostLink(runs(),range,href);
+            dismissed = range;
+            closeLinkPanel();
+            renderSelection(updated,range);
+        }
+        for (const [label,tag,value] of [
+            ["Жирный","b",true],["Курсив","i",true],["Подчёркнутый","u",true],
+            ["Зачёркнутый","s",true],["Спойлер","tg-spoiler",true],["Моноширинный","code",true],
+            ["Блок кода","pre",true],["Цитата","blockquote",true],["Сворачиваемая цитата","blockquote","expandable"],
+            ["Ссылка","a"],["Снять форматирование","clear"],
+        ]) {
+            const action = button(label,() => {
+                if (!selected) return;
+                if (tag === "a") showLinkPanel(selected,true);
+                else {
+                    closeLinkPanel();
+                    const source = tag === "clear" ? replacePostLink(runs(),selected,"") : runs();
+                    renderSelection(applyPostFormat(source,selected,tag,value),selected);
+                }
+            },"plain");
+            action.addEventListener("mousedown",event => event.preventDefault());
+            toolbar.append(action);
+        }
+        const cancelLink = button("Отмена",() => {
+            const range = linkTarget;
+            dismissed = range;
+            closeLinkPanel();
+            input.focus({preventScroll:true});
+            if (range) restorePostSelection(input,...range);
+        },"plain");
+        for (const action of [insertLink,removeLink,cancelLink]) {
+            action.addEventListener("mousedown",event => event.preventDefault());
+        }
+        linkPanel.append(linkAddress,insertLink,removeLink,cancelLink);
+        linkAddress.addEventListener("keydown", event => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                insertLink.click();
+            }
+        });
+        function selectFormatText() {
+            if (!input.isConnected || !sheet.open) {
+                document.removeEventListener("selectionchange",selectFormatText);
+                document.removeEventListener("pointerdown",dismissFormatting,true);
+                return;
+            }
+            if (linkPanel.contains(document.activeElement) || toolbar.contains(document.activeElement)) return;
+            const range = postSelection(input);
+            if (!range && linkTarget && document.activeElement !== input) return;
+            selected = range;
+            toolbar.hidden = !selected;
+            if (!sameSelection(selected,dismissed)) dismissed = null;
+            if (!selected || dismissed) {
+                closeLinkPanel();
+                return;
+            }
+            if (sameSelection(selected,linkTarget)) return;
+            const [link,extra] = postLinks(runs(),selected);
+            if (link && !extra && link.start <= selected[0] && link.end >= selected[1]) {
+                showLinkPanel(selected);
+            } else closeLinkPanel();
+        }
+        function dismissFormatting(event) {
+            if (!input.isConnected || !sheet.open) {
+                document.removeEventListener("selectionchange",selectFormatText);
+                document.removeEventListener("pointerdown",dismissFormatting,true);
+                return;
+            }
+            if (linkPanel.contains(event.target) || toolbar.contains(event.target)) return;
+            closeLinkPanel();
+            if (!input.contains(event.target)) {
+                document.getSelection()?.removeAllRanges();
+                selected = null;
+                dismissed = null;
+                toolbar.hidden = true;
+            }
+        }
+        toolbar.hidden = true;
+        document.addEventListener("selectionchange",selectFormatText);
+        document.addEventListener("pointerdown",dismissFormatting,true);
+        input.addEventListener("paste",event => {
+            const text = event.clipboardData?.getData("text/plain");
+            if (text === undefined) return;
+            event.preventDefault();
+            document.execCommand("insertText",false,text);
+        });
+        body.append(hint,toolbar,linkPanel);
+    }
+    body.append(counter,preview);
     const order = el("div", undefined, "attachment-order");
     body.append(order);
     function showOrder() {
@@ -878,7 +1119,6 @@ function editPost(post, back = () => sheet.close()) {
                 const other = attachments[index + delta];
                 attachments[index + delta] = item;
                 attachments[index] = other;
-                changed = true;
                 redraw();
             }
             const up = button("↑", () => move(-1), "plain");
@@ -893,20 +1133,22 @@ function editPost(post, back = () => sheet.close()) {
             order.append(row);
         });
     }
-    if (company.editable) {
-        const fileLabel = el("label", "Добавить фото или видео");
+    if (canEditMedia) {
         const fileInput = el("input");
+        fileInput.hidden = true;
         fileInput.type = "file";
         fileInput.multiple = true;
         fileInput.accept = "image/jpeg,image/png,image/webp,video/mp4";
-        fileLabel.append(fileInput);
-        body.append(fileLabel);
+        body.append(fileInput,button("Добавить фото или видео",() => fileInput.click(),"editor-add-media"));
         fileInput.addEventListener("change", () => guarded(fileInput, () => {
             const files = Array.from(fileInput.files);
             fileInput.value = "";
             if (files.length + attachments.length > 10) throw new Error("До 10 фото и видео на пост.");
             for (const file of files) {
                 const video = /\.mp4$/i.test(file.name);
+                if (!video && !/\.(?:jpe?g|png|webp)$/i.test(file.name)) {
+                    throw new Error("Выберите JPG, PNG, WebP или MP4.");
+                }
                 if (!file.size || file.size > (video ? 50_000_000 : 20 * 1024 * 1024)) {
                     throw new Error("Фото до 20 МБ, видео MP4 до 50 МБ.");
                 }
@@ -914,33 +1156,36 @@ function editPost(post, back = () => sheet.close()) {
             for (const file of files) attachments.push({
                 file,name:file.name,type:/\.mp4$/i.test(file.name) ? "video" : "image"
             });
-            changed = true;
             redraw();
         }));
     }
-    const actions = el("div", undefined, "row");
-    actions.append(button("Отмена", back, "plain"), button("Сохранить", async () => {
-        if (!input.value.trim() && !attachments.length) throw new Error("Добавьте текст или вложение.");
-        const payload = {company:company.id,id:post.id,version:post.version,action:"edit_text",text:input.value};
-        if (changed) {
-            payload.media = [];
-            for (const item of attachments) {
-                if (item.file && !item.key) item.key = (await api("attachment?company=" + company.id,"PUT",item.file)).id;
-                payload.media.push(item.key);
+    const actions = el("div", undefined, "editor-actions");
+    const save = button("Сохранить", async () => {
+        if (!plain() && !attachments.length) throw new Error("Добавьте текст или вложение.");
+        const payload = {company:company.id,id:post.id,version:post.version,action:"edit_text",text:textForSave()};
+        body.inert = true;
+        try {
+            if (mediaChanged()) {
+                payload.media = [];
+                for (const item of attachments) {
+                    if (item.file && !item.key) item.key = (await api("attachment?company=" + company.id,"PUT",item.file)).id;
+                    payload.media.push(item.key);
+                }
             }
-        }
-        await api("post", "POST", payload);
-        await load();
-        back();
-    }, "primary"));
+            await api("post", "POST", payload);
+            await load();
+            back();
+        } finally { body.inert = false; }
+    }, "primary");
+    actions.append(button("Отмена", back, "plain"),save);
     body.append(actions);
     showSheet("Редактировать пост", body, "", back);
     redraw();
 }
 
-function publicationHistory(filter = "all") {
+function publicationHistory(filter = "all", top) {
     return loadSheet("История публикаций","list",() => cachedApi("history"),
-        ({posts}) => renderPublicationHistory(posts,filter));
+        ({posts}) => renderPublicationHistory(posts,filter),{top});
 }
 
 function renderPublicationHistory(posts, filter) {
@@ -957,7 +1202,10 @@ function renderPublicationHistory(posts, filter) {
     const filtered = posts.filter(post => filter === "all" || post.platform === filter);
     if (!filtered.length) body.append(el("p", "История пока пуста.", "muted"));
     for (const post of filtered) {
-        const row = publicationRow(post, () => versionSheet(post.id, () => publicationHistory(filter)));
+        const row = publicationRow(post, () => {
+            const top = sheet.scrollTop;
+            return versionSheet(post.id, () => publicationHistory(filter,top));
+        });
         body.append(row);
     }
     body.append(button("Пул постов", () => poolSheet(), "text-button"));
@@ -1058,7 +1306,7 @@ function renderMetrics(params, posts, selected, data) {
                 }).finally(() => critiqueRequests.delete(critiqueKey));
                 critiqueRequests.set(critiqueKey,request);
             }
-            try { showCritique(await request); ask.remove(); }
+            try { const result = await request; preserveSheetScroll(() => { showCritique(result); ask.remove(); }); }
             finally { ask.textContent = "Разобрать пост"; }
         }, "text-button");
         ask.disabled = !data.can_critique;
@@ -1067,7 +1315,7 @@ function renderMetrics(params, posts, selected, data) {
         if (running) {
             ask.disabled = true;
             ask.textContent = "Готовим разбор…";
-            running.then(result => { showCritique(result); ask.remove(); }).catch(() => {
+            running.then(result => preserveSheetScroll(() => { showCritique(result); ask.remove(); })).catch(() => {
                 ask.disabled = false;
                 ask.textContent = "Разобрать пост";
             });
@@ -1082,7 +1330,7 @@ function renderMetrics(params, posts, selected, data) {
     if (!posts.length) publications.append(el("p", "Пока нет опубликованных постов.", "muted"));
     for (const post of posts.filter(post => !params.platform || params.platform === "all" || post.platform === params.platform)) {
         const row = publicationRow(post, () => metricsSheet({...params,post:post.id},posts));
-        row.setAttribute("aria-pressed", String(post.id === selected.id));
+        row.setAttribute("aria-pressed", String(post.id === selected?.id));
         publications.append(row);
     }
     const actions = el("div", undefined, "analytics-actions");
@@ -1138,9 +1386,9 @@ function viewBars(data, hours) {
 }
 
 
-function poolSheet(before = 0) {
+function poolSheet(before = 0, top) {
     return loadSheet("Пул постов","list",() => cachedApi("post-pool?before=" + before),
-        pool => renderPool(pool,before));
+        pool => renderPool(pool,before),{top});
 }
 
 function renderPool(pool, before) {
@@ -1152,7 +1400,7 @@ function renderPool(pool, before) {
         const card = el("article", undefined, "card");
         card.append(el("h3", "№" + post.id + " · " + post.topic),
             el("p", statusTitle[post.status] || post.status, "muted"),
-            button("Версии", () => versionSheet(post.id, () => poolSheet(before))));
+            button("Версии", () => { const top = sheet.scrollTop; return versionSheet(post.id, () => poolSheet(before,top)); }));
         body.append(card);
     }
     if (pool.next) body.append(button("Более ранние посты", () => poolSheet(pool.next)));
@@ -1446,8 +1694,16 @@ function profile(company) {
         }
         if (company.vk_channel) {
             const connection = el("div",undefined,"channel-line");
-            connection.append(el("span","ВКонтакте · " + company.vk_channel),
-                el("span","Подключено","channel-state"));
+            const status = el("span","Проверяем…","channel-state");
+            status.setAttribute("role","status");
+            connection.append(icon("vk"),el("span","ВКонтакте · " + company.vk_channel),status);
+            cachedApi("channel-status?company=" + company.id + "&platform=vk",20000).then(result => {
+                status.textContent = result.message;
+                status.dataset.status = result.ok ? "connected" : "error";
+            }).catch(() => {
+                status.textContent = "Не удалось проверить подключение";
+                status.dataset.status = "error";
+            });
             channels.append(connection);
         }
         card.append(channels);
@@ -1493,7 +1749,6 @@ const fileSymbols = {
 };
 const fileKinds = {pdf:"pdf", docx:"doc", doc:"doc", md:"md", txt:"text"};
 const fileKindLabels = {pdf:"PDF", doc:"DOCX", md:"MD", text:"TXT"};
-const documentPreviews = new Map();
 const confirmFile = document.querySelector("#confirm-file");
 
 async function confirmDocumentRemoval(name) {
@@ -1517,6 +1772,11 @@ function fileTile(item, company, remove, sourceType = "document") {
     close.setAttribute("aria-label","Удалить " + item.name);
     close.append(chatIcon("M6 6l12 12M18 6L6 18"));
     tile.append(square,close,el("figcaption",item.name));
+    if (isImage && item.number) {
+        const number = el("span",String(item.number),"profile-file-number");
+        number.setAttribute("aria-label","Картинка №" + item.number);
+        tile.append(number);
+    }
     if (item.preview || (item.file && isImage && item.file.size <= 12_000_000)) {
         const image = el("img");
         image.alt = "";
@@ -1527,31 +1787,23 @@ function fileTile(item, company, remove, sourceType = "document") {
             square.append(image);
         } else {
             const key = sourceType + ":" + company + ":" + item.id;
-            let source = documentPreviews.get(key);
-            if (!source) {
-                source = fetch("/miniapp/api/" + sourceType + "?" + new URLSearchParams({company,id:item.id}), {
-                    headers:{Authorization:"Telegram " + initData}, signal:AbortSignal.timeout(9000),
-                }).then(response => {
-                    if (!response.ok) throw new Error("Предпросмотр недоступен");
-                    return response.blob();
-                }).then(blob => URL.createObjectURL(blob)).catch(() => {
-                    documentPreviews.delete(key);
-                    return "";
-                });
-                documentPreviews.set(key,source);
-                if (documentPreviews.size > 64) {
-                    const oldest = documentPreviews.keys().next().value;
-                    documentPreviews.get(oldest).then(url => { if (url) URL.revokeObjectURL(url); });
-                    documentPreviews.delete(oldest);
-                }
-            }
-            source.then(url => { if (url && tile.isConnected) { image.src = url; square.append(image); } });
+            fetchPreview(key,sourceType + "?" + new URLSearchParams({company,id:item.id})).then(blob => {
+                if (!blob || !tile.isConnected) return;
+                const url = URL.createObjectURL(blob);
+                image.onload = image.onerror = () => URL.revokeObjectURL(url);
+                image.src = url;
+                square.append(image);
+            });
         }
     }
     return tile;
 }
 
 function profileForm(company) {
+    const draftKey = "marketer:profile-draft:" + state.user.id + ":" + (company?.id ?? "new");
+    const initialValues = {};
+    let draft;
+    try { draft = JSON.parse(localStorage.getItem(draftKey) || "{}") || {}; } catch { draft = {}; }
     const form = el("form",undefined,"profile-form");
     const grid = el("div",undefined,"profile-files");
     const pending = new Map();
@@ -1588,7 +1840,9 @@ function profileForm(company) {
         input.name = key;
         const value = key === "channel" ? company?.channel :
             key === "website" ? savedWebsite : company?.details[key];
-        input.value = Array.isArray(value) ? value.join(", ") : value || "";
+        initialValues[key] = Array.isArray(value) ? value.join(", ") : value || "";
+        input.value = typeof draft[key] === "string" && !(key === "name" && company?.is_default)
+            ? draft[key] : initialValues[key];
         input.maxLength = key === "website" ? 2048 : 2000;
         input.required = key === "name";
         if (key !== "website" && key !== "channel") {
@@ -1597,8 +1851,10 @@ function profileForm(company) {
         }
         input.readOnly = key === "name" && Boolean(company?.is_default);
         if (key === "website") {
-            input.type = "url";
-            input.placeholder = "https://example.ru";
+            input.inputMode = "url";
+            input.autocapitalize = "none";
+            input.spellcheck = false;
+            input.placeholder = "example.ru";
         }
         if (key === "channel") input.placeholder = "@канал или ссылка t.me";
         field.append(input);
@@ -1610,11 +1866,31 @@ function profileForm(company) {
         const field = el("label","Сообщество ВКонтакте");
         const input = el("input");
         input.name = "vk_channel";
-        input.value = company?.vk_id || "";
+        initialValues.vk_channel = company?.vk_id || "";
+        input.value = typeof draft.vk_channel === "string" ? draft.vk_channel : initialValues.vk_channel;
         input.placeholder = "vk.com/club123 или ID";
         field.append(input);
         form.append(field);
     }
+
+    const draftStatus = el("p",undefined,"muted profile-draft-status");
+    function persistProfileDraft() {
+        const values = Object.fromEntries(Object.entries(initialValues)
+            .map(([key,value]) => [key,form.elements.namedItem(key)?.value ?? value])
+            .filter(([key,value]) => value !== initialValues[key]));
+        draftStatus.hidden = !Object.keys(values).length;
+        draftStatus.textContent = "Изменения сохранены на этом устройстве. Нажмите «Сохранить профиль», чтобы применить их.";
+        try {
+            if (draftStatus.hidden) localStorage.removeItem(draftKey);
+            else localStorage.setItem(draftKey,JSON.stringify(values));
+        } catch {
+            if (!draftStatus.hidden) draftStatus.textContent = "Изменения ещё не применены. Нажмите «Сохранить профиль».";
+        }
+    }
+    form.addEventListener("input",persistProfileDraft);
+    form.addEventListener("change",persistProfileDraft);
+    form.append(draftStatus);
+    persistProfileDraft();
 
     function addTile(item) {
         const tile = fileTile(item,savedCompany,async () => {
@@ -1628,11 +1904,9 @@ function profileForm(company) {
                     state.document_bytes_available = available;
                 }
                 const key = "document:" + savedCompany + ":" + item.id;
-                documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
-                documentPreviews.delete(key);
+                forgetPreview(key);
             }
-            tile.remove();
-            showFileError("");
+            preserveSheetScroll(() => { tile.remove(); showFileError(""); });
         });
         grid.append(tile);
         return tile;
@@ -1665,14 +1939,17 @@ function profileForm(company) {
             showFileError("Файлы должны быть непустыми и укладываться в общий лимит профиля 100 МБ.");
             return;
         }
-        showFileError("");
-        for (const file of files) pending.set(file,addTile({name:file.name,file}));
+        preserveSheetScroll(() => {
+            showFileError("");
+            for (const file of files) pending.set(file,addTile({name:file.name,file}));
+        });
     });
     const add = button("Добавить файлы +",() => picker.click(),"profile-add-files");
-    form.append(el("h3","Файлы профиля"),el("p","PDF, Word, TXT, MD и до " + profileImageLimit + " картинок · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
+    form.append(el("h3","Файлы профиля"),el("p","PDF, Word, TXT, MD и до " + profileImageLimit + " картинок · до 100 МБ на профиль","muted"),
+        el("p","Чтобы использовать картинки как референсы, назовите в чате до трёх номеров и опишите роль каждой.","muted"),grid,picker,add,fileError);
     if (company) {
         const content = el("div",undefined,"profile-files");
-        const empty = el("p","Здесь будут картинки, которые ассистент создал для постов, и те, что вы добавите сами. Только их ассистент может использовать в постах.","muted");
+        const empty = el("p","Здесь будут картинки, которые ассистент создал для постов, и те, что вы добавите сами.","muted");
         const contentError = el("p",undefined,"sheet-error");
         contentError.setAttribute("role","alert");
         contentError.hidden = true;
@@ -1682,11 +1959,10 @@ function profileForm(company) {
                 await api("content","DELETE",{company:savedCompany,id:item.id});
                 state.content = (state.content || []).filter(entry => entry.id !== item.id);
                 const key = "content:" + savedCompany + ":" + item.id;
-                documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
-                documentPreviews.delete(key);
-                tile.remove();
-                empty.hidden = Boolean(content.childElementCount);
+                forgetPreview(key);
+                preserveSheetScroll(() => { tile.remove(); empty.hidden = Boolean(content.childElementCount); });
             },"content");
+            tile.dataset.contentId = item.id;
             content.append(tile);
         };
         for (const item of state.content || []) addContentTile(item);
@@ -1708,31 +1984,19 @@ function profileForm(company) {
             contentError.hidden = true;
             try {
                 for (const file of files) await api("content?company=" + savedCompany,"PUT",file);
+                const ids = new Set(Array.from(content.children, tile => tile.dataset.contentId));
                 await load();
-                sheet.close();
-                profileForm(state.profiles.find(item => item.id === savedCompany));
+                if (!form.isConnected || !sheet.open || state.active !== savedCompany) return;
+                preserveSheetScroll(() => {
+                    for (const item of state.content || []) if (!ids.has(item.id)) addContentTile(item);
+                    empty.hidden = Boolean(content.childElementCount);
+                });
             } catch (error) {
                 contentError.textContent = error.message;
                 contentError.hidden = false;
             }
         });
-        const logoSelect = el("select");
-        logoSelect.setAttribute("aria-label","Логотип для картинок");
-        const noLogo = el("option","Без логотипа");
-        noLogo.value = "";
-        logoSelect.append(noLogo);
-        for (const item of (state.content || []).filter(entry => entry.kind === "uploaded")) {
-            const option = el("option",item.name);
-            option.value = item.id;
-            logoSelect.append(option);
-        }
-        logoSelect.value = state.content_logo || "";
-        logoSelect.addEventListener("change",() => guarded(logoSelect,async () => {
-            await api("content","POST",{company:savedCompany,logo:logoSelect.value});
-            state.content_logo = logoSelect.value;
-        }));
         form.append(el("h3","Контент"),el("p","Только изображения · до 100 МБ","muted"),content,empty,contentPicker,
-            el("p","Логотип накладывается на сгенерированные картинки (выберите среди добавленных):","muted"),logoSelect,
             button("Добавить картинки +",() => contentPicker.click(),"profile-add-files"),contentError);
     }
     const submit = el("button","Сохранить профиль","primary");
@@ -1741,8 +2005,9 @@ function profileForm(company) {
         event.preventDefault();
         guarded(submit, async () => {
             const {website,...data} = Object.fromEntries(new FormData(form));
-            const url = website.trim();
-            if ((pending.size || url) && !state.storage) throw new Error("Хранилище материалов не подключено.");
+            const rawWebsite = website.trim();
+            const url = rawWebsite && !rawWebsite.includes("://") ? "https://" + rawWebsite : rawWebsite;
+            if ((pending.size || (url && url !== savedWebsite)) && !state.storage) throw new Error("Хранилище материалов не подключено.");
             for (const file of pending.keys()) {
                 if (!file.size || file.size > profileFileLimit) throw new Error("Файл должен быть от 1 байта до 100 МБ.");
             }
@@ -1759,12 +2024,22 @@ function profileForm(company) {
                 await api("website","POST",{company:savedCompany,url});
                 savedWebsite = url;
             }
+            try { localStorage.removeItem(draftKey); } catch {}
+            profileScroll.delete(draftKey);
             sheet.close();
             await load();
         });
     });
     updateCounter();
-    showSheet(company ? "Редактировать профиль" : "Новая компания",form);
+    showSheet(company ? "Редактировать профиль" : "Новая компания",form,"",null,profileScroll.get(draftKey) || 0);
+    sheet.addEventListener("scroll",storeScroll);
+    function storeScroll() {
+        if (!form.isConnected || !sheet.open) {
+            sheet.removeEventListener("scroll",storeScroll);
+            return;
+        }
+        profileScroll.set(draftKey,sheet.scrollTop);
+    }
 }
 
 const chatStages = {
@@ -1796,18 +2071,39 @@ async function waitForChat(job) {
     throw new Error("Не удалось получить ответ. Проверьте черновики перед повтором.");
 }
 
-function chat() {
+function getChatDraft(key) {
+    if (chatDrafts.has(key)) return chatDrafts.get(key);
+    try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+function saveChatDraft(key, text) {
+    chatDrafts.set(key,text);
+    try {
+        if (text) localStorage.setItem(key,text);
+        else localStorage.removeItem(key);
+    } catch { /* Storage is optional in Telegram WebView. */ }
+}
+
+function chat({follow = false} = {}) {
     const company = state.active;
+    const draftKey = "marketer:chat-draft:" + state.user.id + ":" + company;
     const log = chatLogs.get(company) || [];
     chatLogs.set(company, log);
-    const messages = el("div", undefined, "messages");
+    let messages = screen.querySelector(":scope > .messages");
+    const sameChat = messages?.dataset.company === String(company);
+    const previousTop = sameChat ? messages.scrollTop : 0;
+    const atBottom = follow || !sameChat ||
+        messages.scrollHeight - messages.clientHeight - previousTop < 48;
+    if (!sameChat) messages = el("div", undefined, "messages");
+    messages.dataset.company = company;
+    const rows = document.createDocumentFragment();
     if (!log.length && !state.draft_question) {
         const empty = el("div", undefined, "chat-empty");
         const mark = el("span", undefined, "chat-mark");
         mark.append(chatIcon("M7.9 20A9 9 0 1 0 4 16.1L2 22Z M8 12h.01M12 12h.01M16 12h.01"));
         empty.append(mark, el("h2", "Что подготовим?"),
             el("p", "Попросите написать пост или задайте вопрос о компании."));
-        messages.append(empty);
+        rows.append(empty);
     }
     const latestDrafts = new Map();
     const draftDates = new Map();
@@ -1817,13 +2113,14 @@ function chat() {
         if (message.draft_when) draftDates.set(message.draft_id,message.draft_when);
     }
     for (const message of log) {
+        if (message.question_token && message.question_token === state.draft_question?.draft_options.token) continue;
         const bubble = el("div", undefined, "bubble" + (message.me ? " me" : ""));
         const copy = el("p");
         appendPostText(copy, message.text);
         bubble.append(copy);
         const draft = latestDrafts.get(message.draft_id) === message &&
-            (state.posts.find(post => post.id === message.draft_id) ||
-             state.chat_posts?.find(post => post.id === message.draft_id));
+            (state.chat_posts?.find(post => post.id === message.draft_id) ||
+             state.posts.find(post => post.id === message.draft_id));
         if (draft) {
             bubble.classList.add("chat-draft");
             if (!reviewStatuses.includes(draft.status)) {
@@ -1838,7 +2135,7 @@ function chat() {
                     label.dataset.status = draft.status;
                     bubble.append(label);
                 }
-                messages.append(bubble);
+                rows.append(bubble);
                 continue;
             }
             const closeEditor = () => { if (sheet.open) sheet.close(); };
@@ -1846,18 +2143,22 @@ function chat() {
                 when:draftDates.get(draft.id) || message.proposal?.when,refresh:closeEditor,
             }));
         } else if (message.proposal && !message.draft_id) bubble.append(button("Подтвердить", async () => {
+            const {action} = message.proposal;
             const result = await api("post", "POST", message.proposal);
             delete message.proposal;
             await load();
-            feedback(result.simulated ? "Тестовая отправка. Пост в канал не ушёл." : "Действие выполнено.");
+            feedback(action === "copy_to_vk" ? "Копия для ВКонтакте ждёт согласования." :
+                result.simulated ? "Тестовая отправка. Пост в канал не ушёл." : "Действие выполнено.");
         }, "primary"));
-        messages.append(bubble);
+        rows.append(bubble);
     }
     const form = el("form", undefined, "composer");
     const input = el("input");
     input.placeholder = "Сообщение";
     input.setAttribute("aria-label", "Сообщение боту");
     input.maxLength = 4000;
+    input.value = getChatDraft(draftKey);
+    input.addEventListener("input", () => saveChatDraft(draftKey,input.value));
     input.required = true;
     const send = el("button", undefined, "primary send-button");
     send.setAttribute("aria-label", sending ? "Жду ответ…" : "Отправить");
@@ -1878,15 +2179,16 @@ function chat() {
             }),option.id === "cancel" ? "plain" : undefined));
         }
         bubble.append(el("p",question.text),choices);
-        messages.append(bubble);
+        rows.append(bubble);
     }
     async function submit(payload) {
         if (sending) return;
+        if (payload.text) saveChatDraft(draftKey,"");
         const job = {company,id:crypto.randomUUID(),stage:"thinking"};
         pendingChat = job;
         sending = true;
         if (payload.text) log.push({text:payload.text, me:true});
-        chat();
+        chat({follow:true});
         try {
             const request = {company,...payload,id:job.id,background:true};
             let result;
@@ -1904,12 +2206,12 @@ function chat() {
                 state.draft_question = result.draft_options ? result : null;
             }
             try {
-                await load();
-                if (state.active === company && result.reload_history) chatLogs.set(company,state.history || []);
+                await load({syncChat:true});
             } catch {
                 feedback("Ответ получен. Не удалось обновить список черновиков.");
             }
         } catch (error) {
+            if (payload.text && !getChatDraft(draftKey)) saveChatDraft(draftKey,payload.text);
             log.push({text:error.message || "Не удалось получить ответ. Проверьте черновики перед повтором."});
         } finally {
             pendingChat = undefined;
@@ -1924,10 +2226,35 @@ function chat() {
         dots.setAttribute("aria-hidden", "true");
         dots.append(el("i"),el("i"),el("i"));
         pending.append(dots,el("span",chatStages[pendingChat.stage],"chat-pending-label"));
-        messages.append(pending);
+        rows.append(pending);
     }
-    screen.replaceChildren(messages, form);
-    if (log.length || question) requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+    const pinned = () => {
+        if (messages.isConnected && messages.dataset.follow === "true") {
+            messages.scrollTop = messages.scrollHeight;
+        }
+    };
+    if (!sameChat) {
+        messages.addEventListener("scroll", () => {
+            messages.dataset.follow = String(messages.scrollHeight - messages.clientHeight - messages.scrollTop < 48);
+        }, {passive:true});
+        messages.addEventListener("load", pinned, true);
+        messages.addEventListener("loadedmetadata", pinned, true);
+    }
+    messages.replaceChildren(rows);
+    if (sameChat) {
+        const oldForm = screen.querySelector(":scope > .composer");
+        const oldInput = oldForm.querySelector("input");
+        const editing = oldInput === document.activeElement;
+        const start = oldInput.selectionStart;
+        const end = oldInput.selectionEnd;
+        oldForm.replaceWith(form);
+        if (editing) {
+            input.focus({preventScroll:true});
+            input.setSelectionRange(start,end);
+        }
+    } else screen.replaceChildren(messages,form);
+    messages.dataset.follow = String(atBottom);
+    messages.scrollTop = atBottom ? messages.scrollHeight : previousTop;
 }
 
 async function startApp() {
