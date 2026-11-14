@@ -135,3 +135,28 @@ async def _media_rows(db):
 
     async with db.sessionmaker() as session:
         return list(await session.scalars(select(MediaFile)))
+
+
+async def test_profile_text_is_limited_to_2000_characters_in_total(settings, db):
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+
+    async with TestClient(TestServer(app)) as client:
+        owner = {"Authorization": "Telegram " + signed_user(311)}
+        api = "/miniapp/api/"
+        async with client.post(api + "profiles", headers=owner, json={"name": "Студия"}) as r:
+            company = (await r.json())["id"]
+        async with client.get(api + "state", headers=owner) as response:
+            assert (await response.json())["profile_chars_limit"] == 2000
+        body = {"company": company, "description": "а" * 1500, "products": "б" * 400}
+        async with client.patch(api + "profile", headers=owner, json=body) as response:
+            assert response.status == 200
+        body["usp"] = "в" * 200  # вместе уже больше 2000
+        async with client.patch(api + "profile", headers=owner, json=body) as response:
+            assert response.status == 400
+            assert "2000" in (await response.json())["error"]

@@ -33,6 +33,19 @@ PROFILE_FIELD_TITLES: dict[str, str] = {
 }
 
 
+# Всё текстовое описание компании (сумма полей) помещается в промпт целиком, без обрезки
+PROFILE_MAX_CHARS = 2000
+
+
+def profile_chars(values: dict[str, Any]) -> int:
+    """Сколько символов занимают текстовые поля профиля (списки считаются через запятую)."""
+    total = 0
+    for key in PROFILE_FIELD_TITLES:
+        value = values.get(key) or ""
+        total += len(", ".join(value) if isinstance(value, list) else str(value))
+    return total
+
+
 class NoSourcesError(ValueError):
     """У бизнеса ещё нет ни одного материала для профиля."""
 

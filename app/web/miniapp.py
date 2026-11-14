@@ -1624,6 +1624,7 @@ class MiniApp:
                 )
                 if active
                 else None,
+                "profile_chars_limit": business_profile.PROFILE_MAX_CHARS,
                 "document_bytes_available": await remaining_bytes(session, active.id)
                 if active
                 else None,
@@ -1747,6 +1748,13 @@ class MiniApp:
             fields.pop("name", None)
         if "name" in fields and not fields["name"].strip():
             raise ValueError("Укажите название")
+        merged = {**business_profile.get_profile(company).model_dump(), **fields}
+        used = business_profile.profile_chars(merged)
+        if used > business_profile.PROFILE_MAX_CHARS:
+            raise ValueError(
+                f"Описание компании не больше {business_profile.PROFILE_MAX_CHARS} символов "
+                f"суммарно по всем полям (сейчас {used}). Сократите текст."
+            )
         await business_profile.update_profile_fields(session, company, fields)
         if (company.settings or {}).get("default_placeholder"):
             company.settings = {**company.settings, "default_placeholder": False}

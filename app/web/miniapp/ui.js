@@ -1566,6 +1566,22 @@ function profileForm(company) {
         fileError.textContent = message;
         fileError.hidden = !message;
     }
+    const profileCharLimit = state.profile_chars_limit ?? 2000;
+    const textInputs = {};
+    const fixedChars = (company?.details?.tone || "").length;  // тон общения в форме не редактируется
+    const counter = el("p",undefined,"muted");
+    // Лимит общий на все текстовые поля: фронт следит за суммой и не даёт ввести лишнее
+    function updateCounter() {
+        const inputs = Object.values(textInputs);
+        const total = fixedChars + inputs.reduce((sum,input) => sum + input.value.length,0);
+        for (const input of inputs) {
+            input.maxLength = Math.max(input.value.length,profileCharLimit - (total - input.value.length));
+        }
+        counter.textContent = "Описание компании: " + total + " из " + profileCharLimit + " символов";
+        counter.classList.toggle("sheet-error",total > profileCharLimit);
+        const submitButton = form.querySelector("button.primary");
+        if (submitButton) submitButton.disabled = total > profileCharLimit;
+    }
     for (const [key, label] of Object.entries(profileFields)) {
         const field = el("label",label + (key === "name" ? " *" : ""));
         const input = el(["description","visual_style"].includes(key) ? "textarea" : "input");
@@ -1573,8 +1589,12 @@ function profileForm(company) {
         const value = key === "channel" ? company?.channel :
             key === "website" ? savedWebsite : company?.details[key];
         input.value = Array.isArray(value) ? value.join(", ") : value || "";
-        input.maxLength = key === "name" ? 255 : key === "website" ? 2048 : 2000;
+        input.maxLength = key === "website" ? 2048 : 2000;
         input.required = key === "name";
+        if (key !== "website" && key !== "channel") {
+            textInputs[key] = input;
+            input.addEventListener("input",updateCounter);
+        }
         input.readOnly = key === "name" && Boolean(company?.is_default);
         if (key === "website") {
             input.type = "url";
@@ -1584,6 +1604,7 @@ function profileForm(company) {
         field.append(input);
         form.append(field);
     }
+    form.append(counter);
     form.append(el("p","Для публикации добавьте бота в администраторы канала.","muted"));
     if (state.profiles.some(profile => profile.vk_enabled) || company?.vk_channel) {
         const field = el("label","Сообщество ВКонтакте");
@@ -1726,6 +1747,7 @@ function profileForm(company) {
             await load();
         });
     });
+    updateCounter();
     showSheet(company ? "Редактировать профиль" : "Новая компания",form);
 }
 
