@@ -173,7 +173,7 @@ async def main() -> None:
                 log.exception("Ошибка очереди материалов")
                 await asyncio.sleep(5)
     finally:
-        await models.client.close()
+        await models.close()
         await db.dispose()
 
 

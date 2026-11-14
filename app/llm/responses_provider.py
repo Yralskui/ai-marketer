@@ -6,10 +6,11 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from openai import AsyncOpenAI, OpenAIError
+from openai import OpenAIError
 
 from app.config import Settings
 from app.llm.base import LLMError, LLMProvider, LLMResponse, Message, ToolCall
+from app.llm.routes import call_with_routes, openai_clients
 
 
 class ResponsesProvider(LLMProvider):
@@ -19,12 +20,10 @@ class ResponsesProvider(LLMProvider):
         if not settings.llm_api_key:
             raise ValueError("LLM_API_KEY не задан")
         self.model = settings.llm_model_light or settings.llm_model
-        self.client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            timeout=settings.llm_timeout,
-            max_retries=settings.llm_max_retries,
-        )
+        # Через LLM_PROXY и с повторами, как у OpenAIProvider
+        self.clients = openai_clients(settings)
+        self.client = self.clients[0]
+        self.retry_budget = settings.llm_retry_budget_seconds
 
     async def chat(
         self,
@@ -70,7 +69,11 @@ class ResponsesProvider(LLMProvider):
         if json_mode:
             options["text"] = {"format": {"type": "json_object"}}
         try:
-            response = await self.client.responses.create(**options)
+            response = await call_with_routes(
+                self.clients,
+                lambda client: client.responses.create(**options),
+                budget_seconds=self.retry_budget,
+            )
             calls = [
                 ToolCall(item.call_id, item.name, json.loads(item.arguments))
                 for item in response.output

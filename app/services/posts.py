@@ -147,6 +147,11 @@ async def create_draft(
             if images.name == "mock"
             else render_prompt("image", topic=topic, profile=profile_to_text(business))
         )
+        from app.services.brand import image_style
+
+        style = image_style(business)
+        if style:
+            image_prompt += "\nФирменный стиль изображения: " + style
         if reference and images.name != "mock":
             image_prompt += (
                 "\nРелевантные правила и примеры из материалов компании:\n" + reference[:8000]

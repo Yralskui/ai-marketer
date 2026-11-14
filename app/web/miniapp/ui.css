@@ -394,3 +394,10 @@ button.tile { gap: 9px; padding: 10px; }
 .tile-icon { width: 32px; height: 32px; border-radius: 9px; }
 .tile-icon .icon { width: 17px; height: 17px; }
 .tile-text strong { font-size: .9rem; overflow-wrap: normal; hyphens: none; }
+.brand-box {
+  display: grid; gap: 8px; padding: 12px 14px; border-radius: 14px;
+  background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning);
+}
+.brand-box strong { display: flex; align-items: center; gap: 6px; }
+.brand-box ul { margin: 0; padding-inline-start: 20px; color: var(--ink); }
+.brand-box button { justify-self: start; }

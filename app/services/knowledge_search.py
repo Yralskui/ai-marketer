@@ -39,7 +39,7 @@ async def query_vector(settings: Settings, business_id: int, query: str) -> list
     except OpenAIError as exc:
         raise LLMError("Поиск по материалам временно недоступен") from exc
     finally:
-        await models.client.close()
+        await models.close()
     _query_vectors[key] = (monotonic() + QUERY_CACHE_TTL, vector)
     _query_vectors.move_to_end(key)
     if len(_query_vectors) > QUERY_CACHE_SIZE:

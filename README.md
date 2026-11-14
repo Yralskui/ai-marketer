@@ -12,6 +12,8 @@ S3, APScheduler и OpenAI Responses API. Для локальных тестов 
 [подключение компании](docs/ONBOARDING_COMPANY.md) ·
 [выбор нейросети](docs/AI_OPTIONS.md) · [функции и ограничения](docs/FEATURES.md) ·
 [доработки](docs/ROADMAP.md) · [затраты](docs/COSTS.md) ·
+[сценарий демо](docs/DEMO.md) · [чек-лист функций](docs/FEATURE_CHECKLIST.md) ·
+[данные Салаватстекла](content/salavatsteklo/README.md) ·
 [решения](docs/DECISIONS.md) · [правила для Claude Code](CLAUDE.md)
 
 ---

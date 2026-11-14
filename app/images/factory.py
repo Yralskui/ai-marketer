@@ -22,5 +22,7 @@ def create_image_provider(settings: Settings, output_dir: Path = IMAGES_DIR) -> 
             api_key=settings.image_api_key or settings.llm_api_key,
             model=settings.image_model,
             timeout=settings.image_timeout,
+            proxies=settings.llm_proxies,
+            retry_budget=settings.llm_retry_budget_seconds,
         )
     raise ValueError(f"Неизвестный IMAGE_PROVIDER: {provider!r}")

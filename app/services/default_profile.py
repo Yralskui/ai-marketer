@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.knowledge import ProfileDocument
 from app.db.models import Business, SourceType
+from app.services import brand
+from app.services.brand_presets import SALAVATSTEKLO
 from app.services.business_profile import BusinessProfile, add_source
 
 PRESET_ID = "salavatsteklo"
@@ -75,6 +77,12 @@ def knowledge_chunks() -> tuple[str, ...]:
                 f"{body.strip()}"
             )
     return tuple(chunks)
+
+
+def apply_brand_guide(business: Business) -> None:
+    """Бренд-гид САЛАВАТСТЕКЛО: правила написания для проверки постов и стиль картинок."""
+    if not brand.get_guide(business).is_filled():
+        brand.set_guide(business, SALAVATSTEKLO)
 
 
 def knowledge_text() -> str:

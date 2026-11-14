@@ -86,17 +86,28 @@ def get_profile(business: Business) -> BusinessProfile:
 
 
 def profile_to_text(business: Business) -> str:
-    """Профиль простым текстом — для промптов LLM."""
+    """Профиль простым текстом — для промптов LLM.
+
+    Если у компании есть бренд-гид, он добавляется в конец: так стиль бренда попадает во все
+    промпты, которые получают профиль (посты, правки, комментарии, отчёты, агент).
+    """
+    from app.services.brand import get_guide, guide_to_text
+
     profile = get_profile(business)
     if not profile.is_filled():
-        return f"Профиль пока не заполнен. Известно только название: {profile.name}."
-    lines = []
-    for key, title in PROFILE_FIELD_TITLES.items():
-        value = getattr(profile, key)
-        if isinstance(value, list):
-            value = "; ".join(value)
-        lines.append(f"- {title}: {value or '—'}")
-    return "\n".join(lines)
+        text = f"Профиль пока не заполнен. Известно только название: {profile.name}."
+    else:
+        lines = []
+        for key, title in PROFILE_FIELD_TITLES.items():
+            value = getattr(profile, key)
+            if isinstance(value, list):
+                value = "; ".join(value)
+            lines.append(f"- {title}: {value or '—'}")
+        text = "\n".join(lines)
+    guide = guide_to_text(get_guide(business))
+    if guide:
+        text += "\n\n### Бренд-гид (соблюдай строго)\n" + guide
+    return text
 
 
 async def add_source(

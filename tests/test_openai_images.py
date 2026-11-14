@@ -40,6 +40,7 @@ async def test_openai_images_uses_shared_key_and_saves_png(settings, tmp_path):
         fake_client.api_key = client.api_key
         fake_client.base_url = client.base_url
         provider.client = fake_client
+        provider.clients = [fake_client]
         path = await provider.generate("Стеклянный фасад")
 
     assert path.parent == tmp_path
@@ -58,6 +59,7 @@ async def test_failed_image_still_sends_draft_for_approval(agent_ctx, tmp_path):
         api_key="test-project-key", http_client=httpx.AsyncClient(transport=transport)
     ) as fake_client:
         provider.client = fake_client
+        provider.clients = [fake_client]
         agent_ctx.images = provider
         result = await create_post_draft(
             agent_ctx, CreatePostArgs(topic="Новое производство", with_image=True)

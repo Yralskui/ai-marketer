@@ -884,6 +884,12 @@ function postCard(post) {
         media.setAttribute("aria-label", "С изображением");
         meta.append(media);
     }
+    if (post.brand_issues?.length) {
+        const warn = el("span", "Бренд-гид", "status warn");
+        warn.prepend(icon("circle-alert"));
+        warn.title = post.brand_issues.join("; ");
+        meta.append(warn);
+    }
     card.append(meta, el("h3", postTitle(post)));
     const excerpt = postBody(post);
     if (excerpt) card.append(el("p", excerpt, "post-excerpt"));
@@ -962,6 +968,18 @@ function postSheet(post) {
     status.append(statusChip(post.status));
     if (post.when) status.append(el("span", "Выйдет: " + humanDate(post.when), "post-date"));
     content.append(status, postPreview(post));
+    if (post.brand_issues?.length) {
+        const box = el("div", undefined, "brand-box");
+        const head = el("strong", "Проверка по бренд-гиду");
+        head.prepend(icon("circle-alert"));
+        const list = el("ul");
+        for (const issue of post.brand_issues) list.append(el("li", issue));
+        box.append(head, list, button("Исправить по бренд-гиду", () => postAction(post, "revise", {
+            instruction: "Исправь текст по бренд-гиду компании: " + post.brand_issues.join("; ") +
+                ". Остальное не меняй.",
+        }, "Готова исправленная версия"), "primary small", "sparkles"));
+        content.append(box);
+    }
 
     const canPublish = !["scheduled", "draft"].includes(post.status);
     const canSchedule = ["pending_approval", "approved", "scheduled"].includes(post.status);

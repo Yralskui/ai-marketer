@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     llm_timeout: float = 60.0
     llm_max_retries: int = 3
     llm_temperature: float = 0.7
+    # Прокси для LLM (socks5://… или http://…), несколько — через запятую: при сбое следующий
+    llm_proxy: str = ""
+    # Сколько секунд повторять запрос при сбоях сети/прокси, прежде чем сдаться
+    llm_retry_budget_seconds: float = 180.0
+
+    @property
+    def llm_proxies(self) -> list[str]:
+        return [p.strip() for p in self.llm_proxy.split(",") if p.strip()]
 
     # --- Изображения ---
     image_provider: str = "mock"

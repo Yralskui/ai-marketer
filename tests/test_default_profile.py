@@ -123,3 +123,35 @@ async def test_worker_indexes_bundled_knowledge_without_model(db):
         ).all()
     assert len(chunks) == len(default_profile.knowledge_chunks()) == len(models.embedded)
     assert len(storage.saved) == len(chunks)
+
+
+async def test_preset_has_brand_guide_and_post_shows_issues(settings, db):
+    from app.db.models import Post, PostStatus
+    from app.services import brand
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(502)}
+    async with TestClient(TestServer(app)) as client:
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        company = state["active"]
+        async with db.sessionmaker() as session:
+            business = await session.get(Business, company)
+            assert brand.get_guide(business).spelling  # шаблон бренд-гида подключён сам
+            session.add(
+                Post(
+                    business_id=company,
+                    topic="Фасады",
+                    text="Новое стекло Multicomfort Light Blue для фасадов.",
+                    status=PostStatus.PENDING_APPROVAL,
+                )
+            )
+            await session.commit()
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        (post,) = state["posts"]
+        assert any("MultiComfort°" in issue for issue in post["brand_issues"])

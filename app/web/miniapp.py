@@ -55,6 +55,7 @@ from app.services import (
     accounts,
     analytics,
     approval,
+    brand,
     business_profile,
     comments,
     content_plan,
@@ -434,6 +435,7 @@ class MiniApp:
         company.settings = {"miniapp_private": True, "preset": default_profile.PRESET_ID}
         await BusinessRepo(session).set_profile(company, template.model_dump())
         if default_profile.uses_bundled(path):
+            default_profile.apply_brand_guide(company)
             await default_profile.seed_knowledge(session, company)
         if selection.selected_id is None:
             selection.selected_id = company.id
@@ -455,6 +457,7 @@ class MiniApp:
                 "preset": default_profile.PRESET_ID,
             }
             if default_profile.uses_bundled(path):
+                default_profile.apply_brand_guide(company)
                 await default_profile.seed_knowledge(session, company)
 
     async def report(self, session, company, days: int) -> web.Response:
@@ -908,6 +911,7 @@ class MiniApp:
                 .order_by(Post.id.desc())
                 .limit(POST_LIMIT)
             )
+            guide = brand.get_guide(active)
             for post, suggested_at in results:
                 items.append(
                     {
@@ -924,6 +928,7 @@ class MiniApp:
                         "suggested_at": suggested_at.replace(tzinfo=UTC).isoformat()
                         if suggested_at
                         else None,
+                        "brand_issues": brand.check_text(post.text, guide),
                     }
                 )
             docs = await session.scalars(

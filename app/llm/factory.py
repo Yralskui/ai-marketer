@@ -29,5 +29,7 @@ def create_llm(settings: Settings) -> LLMProvider:
             timeout=settings.llm_timeout,
             max_retries=settings.llm_max_retries,
             temperature=settings.llm_temperature,
+            proxies=settings.llm_proxies,
+            retry_budget=settings.llm_retry_budget_seconds,
         )
     raise ValueError(f"Неизвестный LLM_PROVIDER: {provider!r}")

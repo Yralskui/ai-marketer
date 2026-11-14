@@ -85,3 +85,22 @@ def parse_schedule_time(text: str, tz: tzinfo, now: datetime | None = None) -> d
     if parsed <= now_local:
         raise DateParseError("Это время уже прошло")
     return parsed
+
+
+def quick_schedule_options(tz: tzinfo, now: datetime | None = None) -> list[tuple[str, datetime]]:
+    """Готовые варианты времени для кнопок «Запланировать» (aware-даты в поясе tz)."""
+    from datetime import timedelta
+
+    local = (now or datetime.now(UTC)).astimezone(tz)
+    options: list[tuple[str, datetime]] = []
+    in_hour = (local + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    if in_hour - local < timedelta(minutes=20):
+        in_hour += timedelta(hours=1)
+    options.append((f"Через час · {in_hour:%H:%M}", in_hour))
+    evening = local.replace(hour=18, minute=0, second=0, microsecond=0)
+    if evening - local > timedelta(minutes=30) and evening != in_hour:
+        options.append(("Сегодня 18:00", evening))
+    tomorrow = local + timedelta(days=1)
+    options.append(("Завтра 10:00", tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)))
+    options.append(("Завтра 18:00", tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)))
+    return options

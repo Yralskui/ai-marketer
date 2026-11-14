@@ -7,7 +7,6 @@ import base64
 from pathlib import Path
 from typing import Literal
 
-from openai import AsyncOpenAI
 from PIL import Image
 from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
@@ -16,6 +15,7 @@ from app.agent.prompts import render_prompt
 from app.config import Settings
 from app.db.knowledge import EMBEDDING_DIMENSIONS
 from app.ingestion.documents import extract_text
+from app.llm.routes import call_with_routes, close_clients, openai_clients
 
 VISUAL_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 TEXT_EXTENSIONS = {".docx", ".txt", ".md", ".csv", ".json", ".rtf"}
@@ -89,9 +89,13 @@ def text_parts(path: Path) -> list[str]:
 class KnowledgeModels:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.client = AsyncOpenAI(
-            api_key=settings.llm_api_key, base_url=settings.llm_base_url, timeout=180, max_retries=1
-        )
+        # Через LLM_PROXY; временные сбои повторяются в пределах бюджета
+        self.clients = openai_clients(settings, timeout=180)
+        self.client = self.clients[0]
+        self.retry_budget = max(settings.llm_retry_budget_seconds, 180)
+
+    async def close(self) -> None:
+        await close_clients(self.clients)
 
     async def analyze(self, path: Path, profile: str) -> list[str]:
         suffix = path.suffix.lower()
@@ -139,13 +143,22 @@ class KnowledgeModels:
 
     async def _summarize(self, instructions: str, label: str, material: dict) -> list[str]:
         model = self.settings.llm_model_heavy or self.settings.llm_model_light or "gpt-6-luna"
-        response = await self.client.responses.parse(
-            model=model,
-            instructions=instructions,
-            input=[{"role": "user", "content": [{"type": "input_text", "text": label}, material]}],
-            text_format=MaterialSummary,
-            reasoning={"effort": "none" if model.startswith("gpt-6-luna") else "low"},
-            store=False,
+        response = await call_with_routes(
+            self.clients,
+            lambda client: client.responses.parse(
+                model=model,
+                instructions=instructions,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": label}, material],
+                    }
+                ],
+                text_format=MaterialSummary,
+                reasoning={"effort": "none" if model.startswith("gpt-6-luna") else "low"},
+                store=False,
+            ),
+            budget_seconds=self.retry_budget,
         )
         parsed = response.output_parsed
         if parsed is None or not parsed.chunks:
@@ -159,10 +172,15 @@ class KnowledgeModels:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         result = []
         for start in range(0, len(texts), 32):
-            batch = await self.client.embeddings.create(
-                model=self.settings.embedding_model,
-                input=texts[start : start + 32],
-                dimensions=EMBEDDING_DIMENSIONS,
+            part = texts[start : start + 32]
+            batch = await call_with_routes(
+                self.clients,
+                lambda client, part=part: client.embeddings.create(
+                    model=self.settings.embedding_model,
+                    input=part,
+                    dimensions=EMBEDDING_DIMENSIONS,
+                ),
+                budget_seconds=self.retry_budget,
             )
             result.extend(
                 item.embedding for item in sorted(batch.data, key=lambda item: item.index)

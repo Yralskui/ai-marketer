@@ -88,11 +88,17 @@ class FakeSession(BaseSession):
     # --- помощники для проверок
 
     def sent_texts(self, chat_id: int | str) -> list[str]:
-        """Тексты сообщений и подписи к фото, отправленные в чат."""
+        """Тексты сообщений, подписи к фото и правки сообщений в чате — в порядке отправки."""
+        kinds = {
+            "SendMessage": "text",
+            "EditMessageText": "text",
+            "SendPhoto": "caption",
+            "EditMessageCaption": "caption",
+        }
         return [
-            r.text if type(r).__name__ == "SendMessage" else (r.caption or "")
+            getattr(r, kinds[type(r).__name__]) or ""
             for r in self.requests
-            if type(r).__name__ in ("SendMessage", "SendPhoto") and str(r.chat_id) == str(chat_id)
+            if type(r).__name__ in kinds and str(r.chat_id) == str(chat_id)
         ]
 
     def clear(self) -> None:
@@ -185,6 +191,23 @@ def photo_msg(uid: int, file_id: str, caption: str | None = None) -> Update:
             caption=caption,
         ),
     )
+
+
+def last_markup(session: FakeSession):
+    """Последняя отправленная или изменённая inline-клавиатура."""
+    for r in reversed(session.requests):
+        markup = getattr(r, "reply_markup", None)
+        if markup is not None and hasattr(markup, "inline_keyboard"):
+            return markup
+    raise AssertionError("клавиатуры нет")
+
+
+def button_data(markup, predicate) -> str:
+    for row in markup.inline_keyboard:
+        for b in row:
+            if b.callback_data and predicate(b):
+                return b.callback_data
+    raise AssertionError("кнопка не найдена")
 
 
 def last_draft_id(session: FakeSession) -> int:
