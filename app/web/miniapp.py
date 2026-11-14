@@ -203,6 +203,7 @@ class MiniApp:
             ("content", "GET"),
             ("content", "PUT"),
             ("content", "DELETE"),
+            ("content", "POST"),
             ("website", "POST"),
             ("post", "POST"),
             ("post", "PUT"),
@@ -480,6 +481,18 @@ class MiniApp:
                         )
                         if selection.selected_id == company.id:
                             selection.selected_id = default.id if default else None
+                    elif action == "content" and method == "POST":
+                        # логотип для сгенерированных картинок: загруженная картинка или «без логотипа»
+                        raw = str(data.get("logo", ""))
+                        item = await content_gallery.get_content(session, company.id, raw)
+                        if raw and (item is None or item.media_id is None):
+                            raise ValueError("Логотипом может быть добавленная вами картинка")
+                        settings = dict(company.settings or {})
+                        if item is not None:
+                            settings["logo_media_id"] = item.media_id
+                        else:
+                            settings.pop("logo_media_id", None)
+                        company.settings = settings
                     elif action == "content":
                         await session.execute(
                             select(Business.id).where(Business.id == company.id).with_for_update()
@@ -1625,6 +1638,11 @@ class MiniApp:
                 if active
                 else None,
                 "profile_chars_limit": business_profile.PROFILE_MAX_CHARS,
+                "content_logo": (
+                    f"m{(active.settings or {}).get('logo_media_id')}"
+                    if active and (active.settings or {}).get("logo_media_id")
+                    else ""
+                ),
                 "document_bytes_available": await remaining_bytes(session, active.id)
                 if active
                 else None,

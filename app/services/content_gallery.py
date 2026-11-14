@@ -84,7 +84,7 @@ async def _generated(session: AsyncSession, business_id: int) -> list[ContentIma
             "generated",
             path,
             size,
-            (topics.get(revision_id) or "").strip() or f"Изображение №{revision_id}",
+            (topics.get(revision_id) or "").strip()[:60] or f"Изображение №{revision_id}",
         )
         for revision_id, path, size in entries
     ]

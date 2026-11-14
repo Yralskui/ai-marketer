@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from enum import StrEnum
@@ -20,11 +21,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.prompts import load_prompt, render_prompt
-from app.db.models import Business, EventType, Platform, Post, PostStatus
+from app.db.models import Business, EventType, MediaFile, Platform, Post, PostStatus
 from app.db.publications import PostAttachments, PostEditorialSettings
 from app.db.repositories import ChannelRepo, EventLogRepo, PostRepo
 from app.images import ImageGenerationError, ImageGenerationTimeout
 from app.images.base import ImageProvider
+from app.images.logo_overlay import apply_logo
 from app.llm.base import LLMError, LLMProvider
 from app.services.business_profile import profile_to_text
 from app.services.generated_gallery import available_bytes
@@ -138,6 +140,18 @@ def target_length(platform: Platform, with_image: bool) -> int:
     return min(2500, PLATFORM_HARD_LIMITS[platform])
 
 
+async def _stamp_logo(session, business: Business, generated) -> None:
+    """Логотип компании (раздел «Контент») накладывается кодом: нейросеть его не рисует."""
+    media_id = (business.settings or {}).get("logo_media_id")
+    media = await session.get(MediaFile, media_id) if media_id else None
+    if media is None or media.business_id != business.id or not Path(media.path).exists():
+        return
+    try:
+        await asyncio.to_thread(apply_logo, generated, media.path)
+    except Exception:  # логотип — украшение: пост важнее
+        log.warning("Не удалось наложить логотип компании #%s", business.id, exc_info=True)
+
+
 async def create_draft(
     session: AsyncSession,
     llm: LLMProvider,
@@ -216,6 +230,7 @@ async def create_draft(
                 if brief.strip():
                     image_prompt += "\n\nОписание кадра:\n" + brief.strip()[:2500]
             generated = await images.generate(image_prompt)
+            await _stamp_logo(session, business, generated)
             await session.execute(
                 select(Business.id).where(Business.id == business.id).with_for_update()
             )

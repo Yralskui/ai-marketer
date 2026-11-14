@@ -1716,7 +1716,23 @@ function profileForm(company) {
                 contentError.hidden = false;
             }
         });
+        const logoSelect = el("select");
+        logoSelect.setAttribute("aria-label","Логотип для картинок");
+        const noLogo = el("option","Без логотипа");
+        noLogo.value = "";
+        logoSelect.append(noLogo);
+        for (const item of (state.content || []).filter(entry => entry.kind === "uploaded")) {
+            const option = el("option",item.name);
+            option.value = item.id;
+            logoSelect.append(option);
+        }
+        logoSelect.value = state.content_logo || "";
+        logoSelect.addEventListener("change",() => guarded(logoSelect,async () => {
+            await api("content","POST",{company:savedCompany,logo:logoSelect.value});
+            state.content_logo = logoSelect.value;
+        }));
         form.append(el("h3","Контент"),el("p","Только изображения · до 100 МБ","muted"),content,empty,contentPicker,
+            el("p","Логотип накладывается на сгенерированные картинки (выберите среди добавленных):","muted"),logoSelect,
             button("Добавить картинки +",() => contentPicker.click(),"profile-add-files"),contentError);
     }
     const submit = el("button","Сохранить профиль","primary");
