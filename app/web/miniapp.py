@@ -65,6 +65,7 @@ from app.services import (
     default_profile,
     media,
     occasions,
+    post_review,
     posts,
     reports,
     social_metrics,
@@ -107,7 +108,7 @@ class MiniApp:
         app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
         app.router.add_route(
             "*",
-            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|occasion|carousel}",
+            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|review|post-pool|versions|occasion|carousel}",
             self.api,
         )
 
@@ -126,6 +127,7 @@ class MiniApp:
             ("report", "GET"),
             ("history", "GET"),
             ("metrics", "GET"),
+            ("review", "GET"),
             ("post-pool", "GET"),
             ("versions", "GET"),
             ("diagnostics", "GET"),
@@ -220,13 +222,21 @@ class MiniApp:
                     "history",
                     "diagnostics",
                     "metrics",
+                    "review",
                     "post-pool",
                     "versions",
                 }:
                     if active is None:
                         return json_response({"error": "Выберите профиль"}, 404)
                     if action == "report":
-                        return await self.report(session, active, int(request.query.get("days", 7)))
+                        return await self.report(
+                            session,
+                            active,
+                            int(request.query.get("days", 7)),
+                            self.platform_filter(request.query.get("platform")),
+                        )
+                    if action == "review":
+                        return await self.review(session, active, int(request.query.get("post", 0)))
                     if action == "history":
                         return await self.publication_history(session, active)
                     if action == "metrics":
@@ -498,7 +508,24 @@ class MiniApp:
                 default_profile.apply_brand_guide(company)
                 await default_profile.seed_knowledge(session, company)
 
-    async def report(self, session, company, days: int) -> web.Response:
+    @staticmethod
+    def platform_filter(value: str | None) -> Platform | None:
+        """Фильтр «Все / ВКонтакте / Telegram»: all или пусто — без фильтра."""
+        if value in (None, "", "all"):
+            return None
+        if value not in {Platform.TELEGRAM.value, Platform.VK.value}:
+            raise ValueError("Выберите: все, ВКонтакте или Telegram")
+        return Platform(value)
+
+    async def review(self, session, company, post_id: int) -> web.Response:
+        post = await PostRepo(session).get_for_business(post_id, company.id)
+        if post is None:
+            return json_response({"error": "Пост не найден"}, 404)
+        return json_response(await post_review.review(session, post))
+
+    async def report(
+        self, session, company, days: int, platform: Platform | None = None
+    ) -> web.Response:
         if not 1 <= days <= 90:
             raise ValueError("Укажите период от 1 до 90 дней")
         summary = await analytics.get_summary(
@@ -506,6 +533,7 @@ class MiniApp:
             company,
             days=days,
             tz=self.container.settings.tz,
+            platform=platform,
         )
         insights = reports.rule_based_insights(summary)
         chart = await asyncio.to_thread(reports.chart_image, summary)
@@ -581,7 +609,8 @@ class MiniApp:
         else:
             raise ValueError("Выберите 24 часа, 7 или 30 дней")
         post_id = int(query.get("post", 0)) or None
-        payload = await social_metrics.series(session, company.id, start, end, post_id)
+        platform = self.platform_filter(query.get("platform"))
+        payload = await social_metrics.series(session, company.id, start, end, post_id, platform)
         return json_response(
             {
                 **payload,

@@ -25,7 +25,7 @@ from app.publishers.base import Publisher, PublishError
 from app.publishers.vk import VKPublisher, group_id_of, parse_community
 from app.publishers.vk_analytics import VKAnalytics
 from app.publishers.vk_api import VKClient, VKClients, VKError
-from app.services import posts, social_metrics, vk_channel, vk_engagement
+from app.services import post_review, posts, social_metrics, vk_channel, vk_engagement
 from app.services.publishing import PublishingService
 from app.utils.time import utcnow
 from app.web.miniapp import MiniApp
@@ -1112,3 +1112,78 @@ async def test_post_without_channel_fails_with_clear_error_and_can_be_retried(db
     outcome = await service.publish(session, post_row)
     assert not outcome.ok and "не настроен" in outcome.error
     assert post_row.status == PostStatus.FAILED  # из «ошибки» пост можно снова утвердить
+
+
+# ----------------------------------------------------------------------------- фильтр и общий разбор
+
+
+async def _both_networks(session, company):
+    tg = await ChannelRepo(session).upsert(company.id, Platform.TELEGRAM, "@chan", "Канал")
+    vk_link = await ChannelRepo(session).upsert(company.id, Platform.VK, str(GROUP), "Сообщество")
+    rows = {}
+    for platform, link, external in ((Platform.TELEGRAM, tg, "11"), (Platform.VK, vk_link, "22")):
+        row = Post(
+            business_id=company.id,
+            channel_id=link.id,
+            platform=platform,
+            topic="Акция осени",
+            text="Скидки на всё стекло до конца месяца",
+            status=PostStatus.PUBLISHED,
+            external_id=external,
+            published_at=utcnow(),
+        )
+        session.add(row)
+        rows[platform] = row
+    await session.commit()
+    return rows
+
+
+async def test_metrics_filter_by_platform(db, session, owner):
+    from app.db.publications import ChannelSnapshot
+
+    _, company = owner
+    rows = await _both_networks(session, company)
+    hour = utcnow().replace(minute=0, second=0, microsecond=0)
+    for channel in await ChannelRepo(session).list_for_business(company.id):
+        session.add(ChannelSnapshot(channel_id=channel.id, hour=hour, subscribers=100))
+    await session.commit()
+    start, end = hour - timedelta(hours=1), hour + timedelta(hours=1)
+    everything = await social_metrics.series(session, company.id, start, end, None)
+    only_vk = await social_metrics.series(session, company.id, start, end, None, Platform.VK)
+    assert {c["platform"] for c in everything["channels"]} == {"telegram", "vk"}
+    assert [c["platform"] for c in only_vk["channels"]] == ["vk"]
+    assert rows  # посты созданы
+
+
+async def test_review_of_one_post_is_shared_between_networks(db, session, owner):
+    from app.db.publications import PostSnapshot
+
+    _, company = owner
+    rows = await _both_networks(session, company)
+    hour = utcnow().replace(minute=0, second=0, microsecond=0)
+    session.add(
+        PostSnapshot(
+            post_id=rows[Platform.TELEGRAM].id, hour=hour, views=300, forwards=1, deleted=False
+        )
+    )
+    session.add(
+        PostSnapshot(post_id=rows[Platform.VK].id, hour=hour, views=120, forwards=0, deleted=False)
+    )
+    await session.commit()
+    from_tg = await post_review.review(session, rows[Platform.TELEGRAM])
+    from_vk = await post_review.review(session, rows[Platform.VK])
+    assert from_tg == from_vk  # один и тот же разбор, с какой соцсети ни нажми
+    assert {row["platform"]: row["views"] for row in from_tg["platforms"]} == {
+        "telegram": 300,
+        "vk": 120,
+    }
+    assert any("Telegram" in note and "300" in note for note in from_tg["notes"])
+
+
+async def test_review_does_not_mix_different_posts(db, session, owner):
+    _, company = owner
+    rows = await _both_networks(session, company)
+    rows[Platform.VK].topic = "Совсем другая тема"
+    await session.commit()
+    review = await post_review.review(session, rows[Platform.TELEGRAM])
+    assert [row["platform"] for row in review["platforms"]] == ["telegram"]

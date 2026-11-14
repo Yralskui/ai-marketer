@@ -570,6 +570,9 @@ async function publicationHistory() {
             link.rel = "noopener noreferrer";
             card.append(link);
         }
+        if (post.status === "published") {
+            card.append(button("Разбор поста", () => reviewSheet(post.id), "small", "file-text"));
+        }
         // Правка живой записи: пока только там, где соцсеть это позволяет (ВКонтакте)
         if (post.platform === "vk" && post.status === "published" && activeCompany()?.editable) {
             card.append(button("Изменить текст во ВКонтакте", () => editPublishedSheet(post), "small", "pencil"));
@@ -577,6 +580,29 @@ async function publicationHistory() {
         body.append(card);
     }
     showSheet("История публикаций", body);
+}
+
+/** Общий разбор поста: тот же пост в Telegram и ВКонтакте разбирается вместе, цифры по соцсетям. */
+async function reviewSheet(postId) {
+    const data = await api("review?post=" + postId);
+    const body = el("section");
+    body.append(el("h3", data.topic || "Пост №" + postId));
+    const list = el("div", undefined, "list");
+    for (const row of data.platforms) {
+        const item = el("div", undefined, "list-item");
+        const counters = [
+            row.views == null ? "" : `👁 ${row.views}`,
+            row.forwards == null ? "" : `↗ ${row.forwards}`,
+            row.reactions ? `❤ ${row.reactions}` : "",
+            row.comments ? `💬 ${row.comments}` : "",
+        ].filter(Boolean).join("  ");
+        item.append(el("span", row.platform_title + (row.published ? "" : " (не опубликован)")),
+            el("strong", counters || "нет данных"));
+        list.append(item);
+    }
+    body.append(list);
+    for (const note of data.notes) body.append(el("p", note, "post-body"));
+    showSheet("Разбор поста", body);
 }
 
 /** Правка текста уже опубликованной записи: меняется и в соцсети, и у нас. */
@@ -610,15 +636,29 @@ function editPublishedSheet(post) {
     showSheet("Изменить запись · " + (post.topic || "№" + post.id), form);
 }
 
+const PLATFORM_FILTERS = [["all", "Все"], ["vk", "ВКонтакте"], ["telegram", "Telegram"]];
+const PLATFORM_NAMES = {vk: "ВКонтакте", telegram: "Telegram"};
+
+/** Переключатель «Все / ВКонтакте / Telegram» под выбором периода. */
+function platformSwitch(current, change) {
+    const row = el("div", undefined, "segmented");
+    for (const [value, label] of PLATFORM_FILTERS) {
+        const item = button(label, () => change(value), (current || "all") === value ? "active" : undefined);
+        item.setAttribute("aria-pressed", String((current || "all") === value));
+        row.append(item);
+    }
+    return row;
+}
+
 async function metricsSheet(params = {hours: 24}) {
     const data = await api("metrics?" + new URLSearchParams(params));
     const body = el("section");
     const periods = el("div", undefined, "segmented");
     for (const [hours, label] of [[24, "24 часа"], [168, "7 дней"], [720, "30 дней"]]) {
-        periods.append(button(label, () => metricsSheet({hours, post: params.post || 0}),
+        periods.append(button(label, () => metricsSheet({hours, post: params.post || 0, platform: params.platform || "all"}),
             Number(params.hours) === hours ? "active" : undefined));
     }
-    body.append(periods);
+    body.append(periods, platformSwitch(params.platform, (platform) => metricsSheet({...params, post: 0, platform})));
     if (!data.min_date) {
         body.append(el("p", "Первые данные появятся после сбора метрик подключённого канала.", "empty"));
         showSheet("Аналитика", body);
@@ -643,14 +683,15 @@ async function metricsSheet(params = {hours: 24}) {
             !dates.from.checkValidity() || !dates.to.checkValidity()) {
             throw new Error("Выберите даты в пределах сбора аналитики.");
         }
-        return metricsSheet({from: dates.from.value, to: dates.to.value, post: params.post || 0});
+        return metricsSheet({from: dates.from.value, to: dates.to.value, post: params.post || 0, platform: params.platform || "all"});
     }));
     body.append(dateFields);
 
     body.append(el("h3", "Подписчики"));
     if (!data.channels.length) body.append(el("p", "Нет замеров за этот период.", "muted"));
     for (const channel of data.channels) {
-        body.append(el("p", channel.name, "muted"), metricChart(channel.points, data.timezone));
+        const mark = PLATFORM_NAMES[channel.platform] ? PLATFORM_NAMES[channel.platform] + " · " : "";
+        body.append(el("p", mark + channel.name, "muted"), metricChart(channel.points, data.timezone));
     }
 
     if (data.posts.length) {
@@ -660,7 +701,7 @@ async function metricsSheet(params = {hours: 24}) {
         empty.value = "0";
         picker.append(empty);
         for (const post of data.posts) {
-            const option = el("option", "№" + post.id + " · " + post.topic);
+            const option = el("option", "№" + post.id + " · " + (PLATFORM_NAMES[post.platform] || "") + " · " + post.topic);
             option.value = post.id;
             picker.append(option);
         }
@@ -803,22 +844,23 @@ async function versionSheet(postId, before) {
     showSheet(data.topic || "Версии поста", body);
 }
 
-async function reportSheet(days = 7) {
-    const report = await api("report?days=" + days);
+async function reportSheet(days = 7, platform = "all") {
+    const report = await api("report?days=" + days + "&platform=" + platform);
     const body = el("section");
     const periods = el("div", undefined, "segmented");
     for (const period of [7, 30, 90]) {
-        const item = button(period + " дней", () => reportSheet(period), period === days ? "active" : undefined);
+        const item = button(period + " дней", () => reportSheet(period, platform), period === days ? "active" : undefined);
         item.setAttribute("aria-pressed", String(period === days));
         periods.append(item);
     }
+    const filter = platformSwitch(platform, (value) => reportSheet(days, value));
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     const bytes = Uint8Array.from(atob(report.chart), char => char.charCodeAt(0));
     previewUrl = URL.createObjectURL(new Blob([bytes], {type: "image/png"}));
     const image = el("img", undefined, "post-preview");
     image.src = previewUrl;
     image.alt = "Реакции и комментарии по публикациям";
-    body.append(periods, image, el("p", report.text, "post-body"));
+    body.append(periods, filter, image, el("p", report.text, "post-body"));
     if (report.posts?.length) {
         body.append(el("h3", "Счётчики по постам"));
         const list = el("div", undefined, "list");
