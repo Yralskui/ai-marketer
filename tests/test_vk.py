@@ -24,7 +24,7 @@ from app.publishers.base import Publisher, PublishError
 from app.publishers.vk import VKPublisher, group_id_of, parse_community
 from app.publishers.vk_analytics import VKAnalytics
 from app.publishers.vk_api import VKClient, VKClients, VKError
-from app.services import posts, social_metrics, vk_channel
+from app.services import posts, public_posts, social_metrics, vk_channel
 from app.services.publishing import PublishingService
 from app.utils.time import utcnow
 from app.web.miniapp import MiniApp
@@ -122,10 +122,6 @@ class FakeVK:
             return {"response": {"upload_url": "https://upload.vk.test/upload"}}
         if method == "photos.saveWallPhoto":
             return {"response": [{"id": 55, "owner_id": -GROUP}]}
-        if method == "photos.getMessagesUploadServer":
-            return {"response": {"album_id": -64, "upload_url": "https://upload.vk.test/messages"}}
-        if method == "photos.saveMessagesPhoto":
-            return {"response": [{"id": 77, "owner_id": -GROUP, "access_key": "abc"}]}
         if method == "wall.post":
             post_id, self.next_id = self.next_id, self.next_id + 1
             attachments = form.get("attachments", "")
@@ -136,6 +132,8 @@ class FakeVK:
                 "reposts": {"count": 2},
                 "attachments": [
                     {"type": "photo", "photo": {"owner_id": -GROUP, "id": int(a.split("_")[1])}}
+                    if a.startswith("photo")
+                    else {"type": "link", "link": {"url": a}}
                     for a in attachments.split(",")
                     if a
                 ],
@@ -311,25 +309,33 @@ async def test_unexpected_photo_error_stops_publication(publisher, vk, tmp_path)
     assert "wall.post" not in vk.methods()
 
 
-async def test_community_key_uploads_photo_through_message_photos(publisher, vk, tmp_path):
-    """Живой ключ сообщества не грузит фото на стену (27), но принимает «фото сообщений», а ВК
-    принимает такое фото во вложении записи (проверено на живом ключе 14.11.2026)."""
+@pytest.fixture
+def card_publisher(clients) -> VKPublisher:
+    """Публикатор с адресом сайта: для ключа сообщества картинку показывает карточка-ссылка."""
+    return VKPublisher(clients, public_url="https://nexussub.test", secret="test-secret")
+
+
+async def test_community_key_shows_the_picture_as_a_link_card(card_publisher, vk, tmp_path):
+    """Ключ сообщества не грузит фото (27), а «фото сообщений» ВК молча выбрасывает из записи
+    (проверено на живом ключе 14.11.2026). Картинку показывает карточка-ссылка."""
     vk.restricted = True
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
-    result = await publisher.publish(post(image_path=str(image)), channel())
+    result = await card_publisher.publish(post(image_path=str(image)), channel())
+    link = vk.params("wall.post")["attachments"]
+    assert link == f"https://nexussub.test/p/{public_posts.make_token('test-secret', 7)}"
     assert result.note is None
-    assert vk.params("wall.post")["attachments"] == f"photo-{GROUP}_77_abc"
-    assert vk.methods() == [
-        "photos.getWallUploadServer",  # прямой путь закрыт (27)
-        "photos.getMessagesUploadServer",
-        "upload",
-        "photos.saveMessagesPhoto",
-        "wall.post",
-    ]
-    # следующий пост сразу идёт вторым путём: лишний отказ ВК не повторяем
-    await publisher.publish(post(id=8, image_path=str(image)), channel())
+    assert vk.methods() == ["photos.getWallUploadServer", "wall.post"]  # без «фото сообщений»
+    # следующий пост не тратит лишний запрос на заведомый отказ
+    await card_publisher.publish(post(id=8, image_path=str(image)), channel())
     assert vk.methods().count("photos.getWallUploadServer") == 1
+
+
+async def test_user_token_still_uses_native_photos(card_publisher, vk, tmp_path):
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    await card_publisher.publish(post(image_path=str(image)), channel())
+    assert vk.params("wall.post")["attachments"] == f"photo-{GROUP}_55"  # настоящее фото
 
 
 async def test_upload_retries_with_a_fresh_address_after_405(publisher, vk, tmp_path):
@@ -342,9 +348,9 @@ async def test_upload_retries_with_a_fresh_address_after_405(publisher, vk, tmp_
     assert vk.methods().count("upload") == 2
 
 
-async def test_text_goes_out_with_a_note_when_no_photo_path_works(publisher, vk, tmp_path):
+async def test_text_goes_out_with_a_note_without_a_site_address(publisher, vk, tmp_path):
+    """Нет адреса сайта для карточки — текст выходит без картинки и с пояснением."""
     vk.restricted = True
-    vk.fail["photos.getMessagesUploadServer"] = [ERROR_27]
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
     result = await publisher.publish(post(image_path=str(image)), channel())
@@ -460,7 +466,7 @@ async def test_check_channel_says_what_a_community_key_cannot_do(publisher, vk):
     vk.restricted = True
     check = await publisher.check_channel(channel())
     assert check.ok and "Ключ сообщества" in check.message
-    assert "публикация текста и картинок" in check.message
+    assert "картинки карточкой со ссылкой" in check.message
     assert "правка записей и просмотры недоступны" in check.message
 
 
@@ -795,8 +801,8 @@ async def test_miniapp_vk_flow(settings, db, vk):
         assert state["profiles"][0]["vk_channel"] == ""
 
 
-async def test_miniapp_publish_with_community_key_sends_picture(settings, db, vk):
-    """Ваш случай: ключ сообщества, пост с картинкой. Картинка выходит вместе с текстом, а
+async def test_miniapp_publish_with_community_key_sends_picture_card(settings, db, vk):
+    """Ваш случай: ключ сообщества, пост с картинкой. Картинка выходит карточкой-ссылкой, а
     правка живой записи (закрыта ВК) даёт понятную ошибку."""
     vk.restricted = True
     settings.bot_token = BOT_TOKEN
@@ -806,7 +812,9 @@ async def test_miniapp_publish_with_community_key_sends_picture(settings, db, vk
     await container.db.dispose()
     container.db = db
     container.publishing.publishers[Platform.VK] = VKPublisher(
-        VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep)
+        VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep),
+        public_url="https://nexussub.test",
+        secret=BOT_TOKEN,
     )
     app = web.Application()
     MiniApp(container).register(app)
@@ -849,7 +857,9 @@ async def test_miniapp_publish_with_community_key_sends_picture(settings, db, vk
         )
         assert response.status == 200, await response.text()
         assert "note" not in await response.json()  # всё вышло полностью
-        assert vk.wall and vk.params("wall.post")["attachments"] == f"photo-{GROUP}_77_abc"
+        assert vk.wall and vk.params("wall.post")["attachments"].startswith(
+            "https://nexussub.test/p/"
+        )
 
         # правка живой записи недоступна ключу сообщества — понятная ошибка, текст не меняется
         history = (await (await client.get(api + "history", headers=headers)).json())["posts"]

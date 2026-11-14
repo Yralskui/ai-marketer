@@ -195,6 +195,9 @@ async def start_upload_server(container: AppContainer) -> web.AppRunner | None:
         from app.web.miniapp import MiniApp
 
         MiniApp(container).register(app)
+        from app.web.public_post import PublicPosts
+
+        PublicPosts(container).register(app)
     runner = web.AppRunner(
         app,
         access_log=None,

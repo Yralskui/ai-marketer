@@ -141,33 +141,27 @@ class VKClient:
     async def upload_wall_photo(self, group_id: int, path: Path) -> str:
         """Загружает картинку для записи сообщества и возвращает вложение `photo…`.
 
-        Токен администратора загружает фото обычным путём (`photos.getWallUploadServer`).
-        Ключ сообщества этот метод не пускает (ошибка 27), но разрешает «фото сообщений»:
-        такое фото принадлежит самому сообществу, и ВК принимает его во вложении записи
-        (проверено на живом ключе 14.11.2026). Если прямой путь закрыт, запоминаем это и
-        в следующий раз сразу идём вторым.
+        Работает с токеном администратора. Ключ сообщества этот метод не пускает (ошибка 27):
+        отказ запоминается, чтобы не тратить лишний запрос на каждый пост.
+
+        «Фото сообщений» (`photos.getMessagesUploadServer`) как обход НЕ годятся: на живом
+        ключе ВК принял такую запись без ошибки, но молча выбросил вложение (14.11.2026).
+        Для ключа сообщества картинку показывает карточка-ссылка (см. VKPublisher).
         """
-        if not self._wall_upload_forbidden:
-            try:
-                return await self._upload(
-                    path,
-                    server_method="photos.getWallUploadServer",
-                    server_params={"group_id": group_id},
-                    save_method="photos.saveWallPhoto",
-                    save_params={"group_id": group_id},
-                )
-            except VKError as exc:
-                if exc.code not in (15, 27):
-                    raise
+        if self._wall_upload_forbidden:
+            raise VKError(27, "загрузка фото на стену недоступна этому ключу")
+        try:
+            return await self._upload(
+                path,
+                server_method="photos.getWallUploadServer",
+                server_params={"group_id": group_id},
+                save_method="photos.saveWallPhoto",
+                save_params={"group_id": group_id},
+            )
+        except VKError as exc:
+            if exc.code in (15, 27):
                 self._wall_upload_forbidden = True
-                log.info("VK: ключ не загружает фото на стену (%s); идём через фото сообщений", exc)
-        return await self._upload(
-            path,
-            server_method="photos.getMessagesUploadServer",
-            server_params={"peer_id": 0},
-            save_method="photos.saveMessagesPhoto",
-            save_params={},
-        )
+            raise
 
     async def _upload(
         self,

@@ -20,6 +20,7 @@ from typing import Any
 from app.db.models import Channel, Platform, Post
 from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
 from app.publishers.vk_api import VKClients, VKError
+from app.services import public_posts
 from app.services.posts import PLATFORM_HARD_LIMITS
 
 log = logging.getLogger(__name__)
@@ -87,8 +88,13 @@ def _community(info: dict[str, Any]) -> VKCommunity:
 class VKPublisher(Publisher):
     platform = Platform.VK
 
-    def __init__(self, clients: VKClients | None = None) -> None:
+    def __init__(
+        self, clients: VKClients | None = None, *, public_url: str = "", secret: str = ""
+    ) -> None:
         self.clients = clients or VKClients({})
+        # Адрес сайта и секрет для карточек-ссылок: без них картинку без токена админа не показать
+        self.public_url = public_url
+        self.secret = secret
 
     # ------------------------------------------------------------------ подключение
 
@@ -117,6 +123,12 @@ class VKPublisher(Publisher):
 
     # ------------------------------------------------------------------ публикация
 
+    def _card_link(self, post: Post) -> str | None:
+        """Ссылка на публичную страницу поста — из неё ВК делает карточку с картинкой."""
+        if not (self.public_url and self.secret):
+            return None
+        return f"{self.public_url.rstrip('/')}/p/{public_posts.make_token(self.secret, post.id)}"
+
     async def publish(self, post: Post, channel: Channel) -> PublishResult:
         group_id = group_id_of(channel)
         try:
@@ -138,13 +150,18 @@ class VKPublisher(Publisher):
                         raise PublishError(
                             f"ВКонтакте: не удалось загрузить картинку — {exc}"
                         ) from exc
-                    # Не помог ни прямой путь, ни «фото сообщений»: текст выходит без картинки,
-                    # а человек получает объяснение.
-                    log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
-                    note = (
-                        "Пост вышел без картинки: ВКонтакте не принял загрузку фото ключом "
-                        "сообщества. Для картинок может понадобиться токен администратора."
-                    )
+                    # Ключ сообщества не загружает фото. Картинку тогда показывает
+                    # карточка-ссылка на публичную страницу поста (Open Graph).
+                    card = self._card_link(post)
+                    if card is not None:
+                        log.info("VK: картинка поста #%s — карточкой-ссылкой", post.id)
+                        attachments.append(card)
+                    else:
+                        log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
+                        note = (
+                            "Пост вышел без картинки: ВКонтакте не принял загрузку фото ключом "
+                            "сообщества. Для картинок может понадобиться токен администратора."
+                        )
         try:
             response = await client.call(
                 "wall.post",
@@ -238,8 +255,8 @@ class VKPublisher(Publisher):
             return ChannelCheck(True, message + ". Токен администратора: доступны все функции")
         return ChannelCheck(
             True,
-            message + ". Ключ сообщества: публикация текста и картинок, подписчики; "
-            "правка записей и просмотры недоступны (ограничение ВКонтакте)",
+            message + ". Ключ сообщества: публикация текста, картинки карточкой со ссылкой, "
+            "подписчики; правка записей и просмотры недоступны (ограничение ВКонтакте)",
         )
 
 
