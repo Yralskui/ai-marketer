@@ -166,3 +166,55 @@ async def test_miniapp_occasions_and_carousel(settings, db):
             json={"company": state["active"], "id": post_id},
         )
         assert response.status == 400
+
+
+async def test_slide_becomes_post_image(settings, db):
+    """Выбранный слайд карусели — картинка поста; текст не меняется, пост на согласовании."""
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(504)}
+    async with TestClient(TestServer(app)) as client:
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        company = state["active"]
+        key = state["occasions"][0]["key"]
+        post_id = (
+            await (
+                await client.post(
+                    "/miniapp/api/occasion", headers=headers, json={"company": company, "key": key}
+                )
+            ).json()
+        )["id"]
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        post = next(p for p in state["posts"] if p["id"] == post_id)
+        old_text = post["text"]
+
+        response = await client.post(
+            "/miniapp/api/carousel",
+            headers=headers,
+            json={"company": company, "id": post_id, "slide": 99, "version": post["version"]},
+        )
+        assert response.status == 400  # такого слайда нет
+
+        response = await client.post(
+            "/miniapp/api/carousel",
+            headers=headers,
+            json={"company": company, "id": post_id, "slide": 1, "version": post["version"]},
+        )
+        assert response.status == 200
+        state = await (await client.get("/miniapp/api/state", headers=headers)).json()
+        after = next(p for p in state["posts"] if p["id"] == post_id)
+        assert after["status"] == "pending_approval" and after["has_image"]
+        assert after["text"] == old_text
+
+        # Устаревшая версия поста не перезаписывает чужую правку
+        response = await client.post(
+            "/miniapp/api/carousel",
+            headers=headers,
+            json={"company": company, "id": post_id, "slide": 0, "version": post["version"]},
+        )
+        assert response.status == 409

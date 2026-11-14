@@ -810,11 +810,11 @@ function showOccasions(company) {
     node.append(list);
 }
 
-/** Карусель из поста: слайды в фирменном стиле и отправка альбомом в чат с ботом. */
+/** Слайды в фирменном стиле из текста поста: выберите один — он станет картинкой поста. */
 async function carouselSheet(post) {
     const data = await api("carousel?id=" + post.id);
     const body = el("section");
-    body.append(el("p", "Слайды собраны из текста поста в фирменном стиле. Пришлю их вам в чат с ботом альбомом — его можно переслать в канал.", "muted"));
+    body.append(el("p", "Выберите слайд — он станет картинкой этого поста, текст останется. Пост снова придёт на согласование.", "muted"));
     const strip = el("div", undefined, "slides");
     // CSP страницы разрешает картинки только из self, https: и blob:, поэтому не data:
     slideUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -822,18 +822,41 @@ async function carouselSheet(post) {
         const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
         return URL.createObjectURL(new Blob([bytes], {type: "image/png"}));
     });
-    slideUrls.forEach((url, index) => {
+    let chosen = 0;
+    const choice = el("p", undefined, "slide-choice");
+    const frames = slideUrls.map((url, index) => {
+        const frame = el("button", undefined, "slide-pick");
+        frame.type = "button";
         const image = el("img", undefined, "slide");
         image.alt = "Слайд " + (index + 1);
         image.src = url;
-        strip.append(image);
+        frame.append(image, el("span", String(index + 1), "slide-number"));
+        frame.addEventListener("click", () => select(index));
+        strip.append(frame);
+        return frame;
     });
-    body.append(strip, button("Прислать мне в чат (" + data.slides.length + " сл.)", async () => {
+    function select(index) {
+        chosen = index;
+        frames.forEach((frame, i) => frame.setAttribute("aria-pressed", String(i === index)));
+        choice.textContent = "Выбран слайд " + (index + 1) + " из " + frames.length;
+        haptic("light");
+    }
+    select(0);
+    body.append(strip, choice, button("Сделать картинкой поста", async () => {
+        await api("carousel", "POST", {company: state.active, id: post.id, slide: chosen, version: post.version});
+        haptic("success");
+        closeSheet();
+        await load();
+        const updated = state.posts.find((entry) => entry.id === post.id);
+        feedback("Картинка добавлена — пост снова на согласовании", "success");
+        if (updated) postSheet(updated);
+    }, "primary", "image"));
+    body.append(button("Прислать все слайды в чат", async () => {
         await api("carousel", "POST", {company: state.active, id: post.id});
         haptic("success");
-        feedback("Карусель отправлена в чат с ботом", "success");
-    }, "primary", "send"));
-    showSheet("Карусель · " + postTitle(post), body);
+        feedback("Слайды отправлены в чат с ботом — можно переслать в канал", "success");
+    }, "plain", "send"));
+    showSheet("Картинка из слайдов", body);
 }
 
 function showPlans() {
@@ -1102,7 +1125,7 @@ function postSheet(post) {
             feedback("Фото добавлено — пост снова на согласовании", "success");
         }), undefined, "camera"));
         if (post.has_image) row.append(button("Убрать", () => postAction(post, "remove_photo", {}, "Изображение убрано"), "plain"));
-        row.append(button("Карусель", () => carouselSheet(post), undefined, "layers"));
+        row.append(button("Из слайдов", () => carouselSheet(post), undefined, "layers"));
         media.append(row);
     }
 

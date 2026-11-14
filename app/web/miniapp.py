@@ -867,14 +867,43 @@ class MiniApp:
             await approval.submit_for_approval(session, post, None, None)
         return json_response({"id": post.id})
 
+    async def use_slide_as_image(self, session, company, user, post, data) -> web.Response:
+        """Выбранный слайд карусели становится картинкой поста: текст и фото в одном посте."""
+        paths = await carousel.build(company, post, IMAGES_DIR / "carousel")
+        try:
+            index = int(data["slide"])
+            slide = paths[index]
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise ValueError("Выберите слайд") from None
+        async with self.container.publishing.post_lock(post.id):
+            await session.refresh(post)
+            if data.get("version") and post.updated_at.isoformat() != data["version"]:
+                raise approval.PostChangedError
+            if post.status in {PostStatus.PUBLISHED, PostStatus.REJECTED}:
+                raise ValueError("Этот пост нельзя изменить")
+            encoded = await asyncio.to_thread(
+                lambda: self.photo_as_jpeg(bytearray(slide.read_bytes()))
+            )
+            photo, _ = await media.save_photo(
+                session, company, encoded, caption=f"Слайд {index + 1} · пост №{post.id}"
+            )
+            await media.replace_post_photo(session, post, photo, author_id=user.id)
+            await approval.submit_for_approval(session, post, None, None)
+        return json_response({"ok": True, "id": post.id})
+
     async def send_carousel(self, session, company, user, data) -> web.Response:
-        """Слайды карусели — альбомом в личный чат с ботом: переслать в канал или сохранить."""
-        bot = self.container.bot
-        if bot is None:
-            raise ValueError("Бот сейчас не подключён к Telegram — отправить карусель нельзя")
+        """Слайды карусели — альбомом в личный чат с ботом: переслать в канал или сохранить.
+
+        С полем `slide` — один слайд становится картинкой поста (см. use_slide_as_image).
+        """
         post = await PostRepo(session).get_for_business(int(data.get("id", 0)), company.id)
         if post is None:
             return json_response({"error": "Пост не найден"}, 404)
+        if "slide" in data:
+            return await self.use_slide_as_image(session, company, user, post, data)
+        bot = self.container.bot
+        if bot is None:
+            raise ValueError("Бот сейчас не подключён к Telegram — отправить карусель нельзя")
         paths = await carousel.build(company, post, IMAGES_DIR / "carousel")
         caption = f"Карусель к посту №{post.id}: перешлите в канал или сохраните."
         try:
