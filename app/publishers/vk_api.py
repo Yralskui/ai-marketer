@@ -223,7 +223,11 @@ class VKClients:
         version: str = DEFAULT_VERSION,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        business_account: bool = True,
     ) -> None:
+        # False — ключ сообщества без прав администратора: картинки, правка записей и просмотры
+        # недоступны, их не пытаемся вызывать (флаг VK_IS_BUSINESS_ACCOUNT в настройках)
+        self.business_account = business_account
         self.tokens = dict(tokens)
         self._version = version
         self._transport = transport

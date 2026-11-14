@@ -126,7 +126,12 @@ class VKPublisher(Publisher):
         text = post.text[: PLATFORM_HARD_LIMITS[Platform.VK]]
         attachments: list[str] = []
         note: str | None = None
-        if post.image_path:
+        if post.image_path and not self.clients.business_account:
+            note = (
+                "Пост вышел без картинки: для картинок во ВКонтакте нужен бизнес-аккаунт "
+                "(VK_IS_BUSINESS_ACCOUNT)."
+            )
+        elif post.image_path:
             image = Path(post.image_path)
             if not image.exists():
                 log.warning("Картинка поста #%s не найдена: %s", post.id, post.image_path)
@@ -176,6 +181,11 @@ class VKPublisher(Publisher):
         group_id = group_id_of(channel)
         if not post.external_id or not post.external_id.isdecimal():
             raise PublishError("У поста нет номера записи ВКонтакте — править нечего")
+        if not self.clients.business_account:
+            raise PublishError(
+                "ВКонтакте: правка записей доступна только с бизнес-аккаунтом "
+                "(VK_IS_BUSINESS_ACCOUNT)"
+            )
         try:
             client = self.clients.get(group_id)
             attachments: list[str] | None = None

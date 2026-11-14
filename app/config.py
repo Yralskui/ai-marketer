@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # Ключи — секреты, хранятся только в .env; сообщество компании выбирается в Mini App.
     vk_communities: str = ""
     vk_api_version: str = "5.199"
+    # Бизнес-аккаунт ВК с подтверждённым профилем и токеном администратора: картинки, правка
+    # записей, просмотры. False — ключ сообщества: эти функции отключены, ошибок они не дают
+    vk_is_business_account: bool = False
 
     @property
     def vk_tokens(self) -> dict[int, str]:

@@ -46,6 +46,8 @@ class VKAnalytics:
 
     async def post_metrics(self, channel_id: str, post_ids: list[str]) -> dict[str, PostMetrics]:
         group_id = _group_id(channel_id)
+        if not self.clients.business_account:
+            return {}  # просмотры недоступны без бизнес-аккаунта: не спрашиваем и не выдумываем
         ids = [value for value in post_ids if value.isascii() and value.isdecimal()]
         result: dict[str, PostMetrics] = {}
         for start in range(0, len(ids), BATCH):

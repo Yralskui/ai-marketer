@@ -58,7 +58,11 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
     import app.agent.tools  # noqa: F401  — регистрирует инструменты
 
     # ВКонтакте не зависит от бота: публикация и метрики работают, как только заданы ключи
-    vk_clients = VKClients(settings.vk_tokens, version=settings.vk_api_version)
+    vk_clients = VKClients(
+        settings.vk_tokens,
+        version=settings.vk_api_version,
+        business_account=settings.vk_is_business_account,
+    )
     publishers: dict[Platform, Publisher] = {
         Platform.VK: VKPublisher(vk_clients),
         Platform.MAX: MaxPublisher(),

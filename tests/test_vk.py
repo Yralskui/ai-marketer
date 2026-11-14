@@ -1187,3 +1187,36 @@ async def test_review_does_not_mix_different_posts(db, session, owner):
     await session.commit()
     review = await post_review.review(session, rows[Platform.TELEGRAM])
     assert [row["platform"] for row in review["platforms"]] == ["telegram"]
+
+
+# ----------------------------------------------------------------------------- флаг бизнес-аккаунта
+
+
+def plain_clients(vk: FakeVK) -> VKClients:
+    return VKClients(
+        {GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep, business_account=False
+    )
+
+
+async def test_without_business_account_pictures_and_views_are_not_even_tried(vk, tmp_path):
+    clients = plain_clients(vk)
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await VKPublisher(clients).publish(post(image_path=str(image)), channel())
+    assert "бизнес-аккаунт" in result.note
+    assert vk.methods() == ["wall.post"]  # ни загрузки фото, ни лишних запросов
+    assert await VKAnalytics(clients).post_metrics(str(GROUP), ["100"]) == {}
+    with pytest.raises(PublishError, match="бизнес-аккаунт"):
+        await VKPublisher(clients).edit(post(external_id="100"), channel(), "новый текст")
+    assert "wall.getById" not in vk.methods() and "wall.edit" not in vk.methods()
+
+
+async def test_without_business_account_sync_does_not_read_the_wall(db, session, owner, vk):
+    _, company = owner
+    await _published(session, company, "100")
+    stats = await vk_engagement.sync_engagement(db.sessionmaker, plain_clients(vk))
+    assert stats["posts"] == 0 and vk.methods() == []
+
+
+def test_business_account_flag_defaults_to_off():
+    assert Settings(_env_file=None).vk_is_business_account is False

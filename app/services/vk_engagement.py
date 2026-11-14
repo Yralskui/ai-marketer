@@ -191,8 +191,8 @@ async def sync_engagement(
             by_group.setdefault(int(channel_external), []).append((post_id, int(external_id)))
 
     for group_id, posts in by_group.items():
-        if not clients.has(group_id):
-            continue
+        if not clients.has(group_id) or not clients.business_account:
+            continue  # без бизнес-аккаунта стену не читаем: лайки и комментарии идут через Long Poll
         client = clients.get(group_id)
         for start in range(0, len(posts), PAGE):
             chunk = posts[start : start + PAGE]
