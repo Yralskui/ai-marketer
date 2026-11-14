@@ -17,6 +17,7 @@ from app.db.base import Database
 from app.db.knowledge import KnowledgeChunk, ProfileDocument
 from app.db.models import Business, Source
 from app.ingestion.knowledge import KnowledgeModels
+from app.services import default_profile
 from app.services.business_profile import profile_to_text
 from app.services.object_storage import ObjectStorage
 from app.utils.time import utcnow
@@ -55,14 +56,20 @@ async def process(
     keys = []
     completed = False
     try:
-        with TemporaryDirectory(prefix="marketer-material-") as tmp:
-            path = Path(tmp) / ("original" + Path(document.filename).suffix.lower())
-            await storage.download(document.original_key, path)
-            async with asyncio.timeout(2400):
-                chunks = await models.analyze(path, profile)
+        if default_profile.is_preset_document(document):
+            # Встроенная база знаний уже разбита на фрагменты — модель не нужна
+            chunks = list(default_profile.knowledge_chunks())
+            async with asyncio.timeout(600):
                 vectors = await models.embed(chunks)
-            if not chunks or len(chunks) != len(vectors):
-                raise ValueError("Не удалось сформировать индекс")
+        else:
+            with TemporaryDirectory(prefix="marketer-material-") as tmp:
+                path = Path(tmp) / ("original" + Path(document.filename).suffix.lower())
+                await storage.download(document.original_key, path)
+                async with asyncio.timeout(2400):
+                    chunks = await models.analyze(path, profile)
+                    vectors = await models.embed(chunks)
+        if not chunks or len(chunks) != len(vectors):
+            raise ValueError("Не удалось сформировать индекс")
         async with database.sessionmaker() as session:
             current = await session.scalar(
                 select(ProfileDocument).where(ProfileDocument.id == document.id).with_for_update()
@@ -130,7 +137,8 @@ async def cleanup_one(database: Database, storage: ObjectStorage) -> bool:
                 select(KnowledgeChunk.markdown_key).where(KnowledgeChunk.document_id == document.id)
             )
         )
-        for key in [document.original_key, *keys]:
+        originals = [] if default_profile.is_preset_document(document) else [document.original_key]
+        for key in [*originals, *keys]:
             await storage.delete(key)
         await session.execute(
             delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)

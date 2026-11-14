@@ -58,6 +58,7 @@ from app.services import (
     business_profile,
     comments,
     content_plan,
+    default_profile,
     media,
     posts,
     reports,
@@ -192,7 +193,7 @@ class MiniApp:
                     )
                 ):
                     await self.create_default(session, user, selection)
-                elif self.container.settings.default_profile_file and user.is_active:
+                elif user.is_active:
                     await self.fill_default_placeholder(session, user)
                 await session.commit()
                 if not user.is_active or (
@@ -308,6 +309,10 @@ class MiniApp:
                     if action == "profile" and method == "PATCH":
                         await self.edit_profile(session, company, user, data)
                     elif action == "profile":
+                        if default_profile.is_preset(company):
+                            return json_response(
+                                {"error": "Стандартный профиль нельзя удалить"}, 403
+                            )
                         locked = await session.scalar(
                             select(Business)
                             .where(Business.id == company.id)
@@ -342,6 +347,11 @@ class MiniApp:
                         )
                         if doc is None or doc.status == "deleted":
                             return json_response({"error": "Файл не найден"}, 404)
+                        if method == "DELETE" and default_profile.is_preset_document(doc):
+                            return json_response(
+                                {"error": "Базу знаний стандартного профиля удалить нельзя"},
+                                403,
+                            )
                         if method == "DELETE":
                             doc.status = "deleted"
                         elif doc.status == "failed":
@@ -417,38 +427,35 @@ class MiniApp:
             return json_response({"error": "Операция не завершилась. Попробуйте ещё раз."}, 500)
 
     async def create_default(self, session, user, selection) -> None:
+        """Стандартный профиль САЛАВАТСТЕКЛО: карточка, пометка preset и база знаний."""
         path = self.container.settings.default_profile_file
-        template = (
-            business_profile.BusinessProfile.model_validate_json(Path(path).read_bytes())
-            if path
-            else business_profile.BusinessProfile(name="Салаватстекло")
-        )
-        if not template.name:
-            raise ValueError("У шаблона компании должно быть имя")
+        template = default_profile.load_template(path)
         company = await BusinessRepo(session).create(user.id, template.name)
-        company.settings = {"miniapp_private": True, "default_placeholder": not path}
+        company.settings = {"miniapp_private": True, "preset": default_profile.PRESET_ID}
         await BusinessRepo(session).set_profile(company, template.model_dump())
-        if path and selection.selected_id is None:
+        if default_profile.uses_bundled(path):
+            await default_profile.seed_knowledge(session, company)
+        if selection.selected_id is None:
             selection.selected_id = company.id
         selection.default_created = True
 
     async def fill_default_placeholder(self, session, user) -> None:
-        candidates = await BusinessRepo(session).list_owned(user.id)
-        for company in candidates:
+        """Профили-заглушки старых версий превращаем в стандартный профиль."""
+        path = self.container.settings.default_profile_file
+        for company in await BusinessRepo(session).list_owned(user.id):
             settings = company.settings or {}
             if not settings.get("default_placeholder") or settings.get("miniapp_archived"):
                 continue
-            if (
-                company.name == "Салаватстекло"
-                and not business_profile.get_profile(company).is_filled()
-            ):
-                template = business_profile.BusinessProfile.model_validate_json(
-                    Path(self.container.settings.default_profile_file).read_bytes()
-                )
-                if not template.name:
-                    raise ValueError("У шаблона компании должно быть имя")
+            if not business_profile.get_profile(company).is_filled():
+                template = default_profile.load_template(path)
                 await BusinessRepo(session).set_profile(company, template.model_dump())
-            company.settings = {**settings, "default_placeholder": False}
+            company.settings = {
+                **settings,
+                "default_placeholder": False,
+                "preset": default_profile.PRESET_ID,
+            }
+            if default_profile.uses_bundled(path):
+                await default_profile.seed_knowledge(session, company)
 
     async def report(self, session, company, days: int) -> web.Response:
         if not 1 <= days <= 90:
