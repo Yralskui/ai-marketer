@@ -201,6 +201,47 @@ async def create_draft(
     return post
 
 
+async def clone_for_platform(
+    session: AsyncSession, post: Post, platform: Platform, *, author_id: int | None = None
+) -> Post:
+    """Копия поста для другой соцсети: тот же текст и картинка, новый черновик.
+
+    Копия — обычный черновик: уходит на согласование и публикуется только после него.
+    """
+    if Platform(post.platform) == platform:
+        raise ValueError("Пост уже предназначен для этой платформы")
+    limit = PLATFORM_HARD_LIMITS[platform]
+    text = post.text
+    if len(text) > limit:
+        cut = text[: limit - 1]
+        text = (cut[: cut.rfind(" ")] if " " in cut[-200:] else cut).rstrip() + "…"
+    channel = await ChannelRepo(session).get_active(post.business_id, platform)
+    copy = Post(
+        business_id=post.business_id,
+        channel_id=channel.id if channel else None,
+        platform=platform,
+        topic=post.topic,
+        text=text,
+        image_path=post.image_path,
+        status=PostStatus.DRAFT,
+    )
+    await PostRepo(session).add(copy)
+    await save_revision(
+        session,
+        copy,
+        RevisionSource("copy", author_id=author_id, request_text=f"Копия поста №{post.id}"),
+        image_change=True,
+        image_source="copy",
+    )
+    await EventLogRepo(session).log(
+        EventType.POST_CREATED,
+        f"копия поста #{post.id} для {platform.value}",
+        business_id=post.business_id,
+        post_id=copy.id,
+    )
+    return copy
+
+
 async def revise(
     session: AsyncSession,
     llm: LLMProvider,

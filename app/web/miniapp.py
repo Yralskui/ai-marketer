@@ -52,6 +52,7 @@ from app.db.repositories.agent_message import AgentMessageRepo
 from app.ingestion.knowledge import MATERIAL_EXTENSIONS
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text
 from app.llm.base import LLMError
+from app.publishers.base import PublishError
 from app.services import (
     accounts,
     analytics,
@@ -64,9 +65,11 @@ from app.services import (
     default_profile,
     media,
     occasions,
+    post_review,
     posts,
     reports,
     social_metrics,
+    vk_channel,
 )
 from app.services.document_uploads import DocumentQuotaError, save_document, stage_document
 from app.services.post_history import RevisionSource, save_revision
@@ -105,7 +108,7 @@ class MiniApp:
         app.router.add_get(r"/miniapp/{asset:ui\.js|ui\.css|icons\.svg|glass\.webp}", self.asset)
         app.router.add_route(
             "*",
-            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|post-pool|versions|occasion|carousel}",
+            "/miniapp/api/{action:state|profiles|select|profile|document|post|plan|chat|preview|settings|comment|photo|report|history|diagnostics|website|metrics|review|post-pool|versions|occasion|carousel}",
             self.api,
         )
 
@@ -124,6 +127,7 @@ class MiniApp:
             ("report", "GET"),
             ("history", "GET"),
             ("metrics", "GET"),
+            ("review", "GET"),
             ("post-pool", "GET"),
             ("versions", "GET"),
             ("diagnostics", "GET"),
@@ -218,13 +222,21 @@ class MiniApp:
                     "history",
                     "diagnostics",
                     "metrics",
+                    "review",
                     "post-pool",
                     "versions",
                 }:
                     if active is None:
                         return json_response({"error": "Выберите профиль"}, 404)
                     if action == "report":
-                        return await self.report(session, active, int(request.query.get("days", 7)))
+                        return await self.report(
+                            session,
+                            active,
+                            int(request.query.get("days", 7)),
+                            self.platform_filter(request.query.get("platform")),
+                        )
+                    if action == "review":
+                        return await self.review(session, active, int(request.query.get("post", 0)))
                     if action == "history":
                         return await self.publication_history(session, active)
                     if action == "metrics":
@@ -316,10 +328,10 @@ class MiniApp:
                         raise ValueError("Укажите название")
                     company = await BusinessRepo(session).create(user.id, name)
                     company.settings = {"miniapp_private": True}
-                    await self.edit_profile(session, company, user, data)
+                    warnings = await self.edit_profile(session, company, user, data)
                     selection.selected_id = company.id
                     await session.commit()
-                    return json_response({"ok": True, "id": company.id})
+                    return json_response({"ok": True, "id": company.id, "warnings": warnings})
                 else:
                     company = allowed.get(data.get("company"))
                     if company is None:
@@ -339,7 +351,9 @@ class MiniApp:
                             return await self.occasion_draft(session, company, user, data)
                         return await self.send_carousel(session, company, user, data)
                     if action == "profile" and method == "PATCH":
-                        await self.edit_profile(session, company, user, data)
+                        warnings = await self.edit_profile(session, company, user, data)
+                        await session.commit()
+                        return json_response({"ok": True, "warnings": warnings})
                     elif action == "profile":
                         if default_profile.is_preset(company):
                             return json_response(
@@ -441,7 +455,10 @@ class MiniApp:
                                 reply = await answer(ctx, message)
                                 await session.commit()
                                 return json_response(reply)
-                            await self.post_action(session, user, company, data)
+                            note = await self.post_action(session, user, company, data)
+                            if note:
+                                await session.commit()
+                                return json_response({"ok": True, "note": note})
                 await session.commit()
                 return json_response({"ok": True})
         except approval.PostChangedError:
@@ -491,7 +508,24 @@ class MiniApp:
                 default_profile.apply_brand_guide(company)
                 await default_profile.seed_knowledge(session, company)
 
-    async def report(self, session, company, days: int) -> web.Response:
+    @staticmethod
+    def platform_filter(value: str | None) -> Platform | None:
+        """Фильтр «Все / ВКонтакте / Telegram»: all или пусто — без фильтра."""
+        if value in (None, "", "all"):
+            return None
+        if value not in {Platform.TELEGRAM.value, Platform.VK.value}:
+            raise ValueError("Выберите: все, ВКонтакте или Telegram")
+        return Platform(value)
+
+    async def review(self, session, company, post_id: int) -> web.Response:
+        post = await PostRepo(session).get_for_business(post_id, company.id)
+        if post is None:
+            return json_response({"error": "Пост не найден"}, 404)
+        return json_response(await post_review.review(session, post))
+
+    async def report(
+        self, session, company, days: int, platform: Platform | None = None
+    ) -> web.Response:
         if not 1 <= days <= 90:
             raise ValueError("Укажите период от 1 до 90 дней")
         summary = await analytics.get_summary(
@@ -499,6 +533,7 @@ class MiniApp:
             company,
             days=days,
             tz=self.container.settings.tz,
+            platform=platform,
         )
         insights = reports.rule_based_insights(summary)
         chart = await asyncio.to_thread(reports.chart_image, summary)
@@ -574,7 +609,8 @@ class MiniApp:
         else:
             raise ValueError("Выберите 24 часа, 7 или 30 дней")
         post_id = int(query.get("post", 0)) or None
-        payload = await social_metrics.series(session, company.id, start, end, post_id)
+        platform = self.platform_filter(query.get("platform"))
+        payload = await social_metrics.series(session, company.id, start, end, post_id, platform)
         return json_response(
             {
                 **payload,
@@ -683,6 +719,8 @@ class MiniApp:
                         else None,
                         "url": post.external_url,
                         "has_image": bool(post.image_path),
+                        "platform": post.platform,
+                        "version": post.updated_at.isoformat(),
                     }
                     for post in rows
                 ]
@@ -696,11 +734,16 @@ class MiniApp:
         channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
         publisher = self.container.publishing.get_publisher(Platform.TELEGRAM)
         check = await publisher.check_channel(channel) if channel and publisher else None
+        vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
+        vk_publisher = self.container.publishing.get_publisher(Platform.VK)
+        vk_check = await vk_publisher.check_channel(vk) if vk and vk_publisher else None
         scheduler = self.container.scheduler
         return json_response(
             {
                 "channel": channel.external_id if channel else None,
                 "channel_check": asdict(check) if check else None,
+                "vk_channel": (vk.title or vk.external_id) if vk else None,
+                "vk_check": asdict(vk_check) if vk_check else None,
                 "dry_run": self.container.publishing.dry_run,
                 "counts": await PostRepo(session).count_by_status(company.id),
                 "jobs": [
@@ -1072,6 +1115,7 @@ class MiniApp:
         profiles = []
         for company in companies:
             channel = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
+            vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
             profiles.append(
                 {
                     "id": company.id,
@@ -1080,6 +1124,9 @@ class MiniApp:
                     "editable": company.owner_id == user.id,
                     "invite_enabled": accounts.is_admin(user) and company.owner_id == user.id,
                     "channel": channel.external_id if channel else "",
+                    "vk_channel": (vk.title or vk.external_id) if vk else "",
+                    "vk_id": vk.external_id if vk else "",
+                    "vk_enabled": bool(self.container.settings.vk_tokens),
                     "preset": default_profile.is_preset(company),
                 }
             )
@@ -1126,7 +1173,7 @@ class MiniApp:
             }
         ]
 
-    async def edit_profile(self, session, company, user, data) -> None:
+    async def edit_profile(self, session, company, user, data) -> list[str]:
         fields = {
             key: str(value)[:2000]
             for key, value in data.items()
@@ -1137,35 +1184,58 @@ class MiniApp:
         await business_profile.update_profile_fields(session, company, fields)
         if (company.settings or {}).get("default_placeholder"):
             company.settings = {**company.settings, "default_placeholder": False}
+        warnings: list[str] = []
         if data.get("channel"):
-            channel = accounts.normalize_channel_id(str(data["channel"]).strip())
-            channels = ChannelRepo(session)
-            existing = await channels.get_active(company.id, Platform.TELEGRAM)
-            if existing is None or existing.external_id != channel:
-                bot = self.container.bot
-                if bot is None:
-                    raise ValueError(
-                        "Бот сейчас не подключён к Telegram, поэтому канал не проверить. "
-                        "Подключите канал, когда бот запущен на сервере."
-                    )
-                try:
-                    chat_id = int(channel) if channel.startswith("-100") else channel
-                    me = await bot.me()
-                    member = await bot.get_chat_member(chat_id, user.telegram_id)
-                    bot_member = await bot.get_chat_member(chat_id, me.id)
-                except TelegramAPIError:
-                    raise ValueError("Добавьте бота в канал и проверьте его адрес") from None
-                if member.status not in {ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR}:
-                    raise ValueError("Подключить канал может его администратор")
-                if bot_member.status != ChatMemberStatus.CREATOR and not getattr(
-                    bot_member, "can_post_messages", False
-                ):
-                    raise ValueError("Дайте боту право публиковать сообщения в канале")
-                await channels.upsert(company.id, Platform.TELEGRAM, channel)
+            try:
+                await self.connect_telegram(session, company, user, str(data["channel"]).strip())
+            except ValueError as exc:
+                warnings.append(f"Telegram-канал не подключён: {exc}")
         elif "channel" in data:
             current = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
             if current is not None:
                 current.is_active = False
+        if "vk_channel" in data:
+            raw = str(data["vk_channel"]).strip()
+            current_vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
+            if raw and current_vk is not None and raw in (current_vk.external_id, current_vk.title):
+                pass  # поле формы просто вернуло уже подключённое сообщество
+            elif raw:
+                publisher = self.container.publishing.get_publisher(Platform.VK)
+                try:
+                    await vk_channel.connect(session, publisher, company, raw)
+                except ValueError as exc:
+                    warnings.append(f"Сообщество ВКонтакте не подключено: {exc}")
+            else:
+                await vk_channel.disconnect(session, company)
+        return warnings
+
+    async def connect_telegram(self, session, company, user, raw: str) -> None:
+        """Проверяет и подключает Telegram-канал. Ошибка — ValueError с понятным текстом."""
+        channel = accounts.normalize_channel_id(raw)
+        channels = ChannelRepo(session)
+        existing = await channels.get_active(company.id, Platform.TELEGRAM)
+        if existing is not None and existing.external_id == channel:
+            return
+        bot = self.container.bot
+        if bot is None:
+            raise ValueError(
+                "бот сейчас не подключён к Telegram, поэтому канал не проверить. "
+                "Подключите канал, когда бот запущен на сервере."
+            )
+        try:
+            chat_id = int(channel) if channel.startswith("-100") else channel
+            me = await bot.me()
+            member = await bot.get_chat_member(chat_id, user.telegram_id)
+            bot_member = await bot.get_chat_member(chat_id, me.id)
+        except TelegramAPIError:
+            raise ValueError("добавьте бота в канал и проверьте его адрес") from None
+        if member.status not in {ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR}:
+            raise ValueError("подключить канал может его администратор")
+        if bot_member.status != ChatMemberStatus.CREATOR and not getattr(
+            bot_member, "can_post_messages", False
+        ):
+            raise ValueError("дайте боту право публиковать сообщения в канале")
+        await channels.upsert(company.id, Platform.TELEGRAM, channel)
 
     async def upload(self, request, session, company, user) -> web.Response:
         if self.container.storage is None:
@@ -1215,7 +1285,7 @@ class MiniApp:
             self.active_uploads -= 1
         return json_response({"ok": True})
 
-    async def post_action(self, session, user, company, data) -> None:
+    async def post_action(self, session, user, company, data) -> str | None:
         post = await PostRepo(session).get_for_business(int(data["id"]), company.id)
         if post is None:
             raise ValueError("Пост не найден")
@@ -1230,7 +1300,8 @@ class MiniApp:
             )
             if not result.ok:
                 raise ValueError(result.error or "Публикация не состоялась")
-            return
+            # Пояснение, если пост вышел не полностью (например, ВК принял его без картинки)
+            return result.result.note if result.result else None
         async with publishing.post_lock(post.id):
             await session.refresh(post)
             if post.updated_at.isoformat() != version:
@@ -1296,6 +1367,18 @@ class MiniApp:
                     source=RevisionSource("manual", author_id=user.id, request_text=instruction),
                 )
                 await approval.submit_for_approval(session, post, None, None)
+            elif action == "copy_to_vk":
+                if await ChannelRepo(session).get_active(company.id, Platform.VK) is None:
+                    raise ValueError("Сначала подключите сообщество ВКонтакте")
+                copy = await posts.clone_for_platform(session, post, Platform.VK, author_id=user.id)
+                await approval.submit_for_approval(session, copy, None, None)
+            elif action == "edit_published" and post.status == PostStatus.PUBLISHED:
+                try:
+                    await publishing.edit_published(
+                        session, post, str(data.get("text", "")), author_id=user.id
+                    )
+                except PublishError as exc:
+                    raise ValueError(str(exc)) from None
             else:
                 raise ValueError("Действие недоступно для этого статуса")
             await session.commit()

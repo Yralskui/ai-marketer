@@ -21,6 +21,8 @@ class PublishResult:
     external_id: str
     url: str | None = None
     dry_run: bool = False
+    # Необязательное пояснение человеку: пост вышел, но не полностью (например, без картинки)
+    note: str | None = None
 
 
 @dataclass
@@ -39,3 +41,11 @@ class Publisher(ABC):
     async def check_channel(self, channel: Channel) -> ChannelCheck:
         """Диагностика для /status: доступен ли канал и есть ли права."""
         return ChannelCheck(False, "Проверка канала для этой платформы не реализована")
+
+    async def edit(self, post: Post, channel: Channel, text: str) -> None:
+        """Необязательная возможность: заменить текст уже опубликованного поста.
+
+        Публикатор платформы, где это можно, переопределяет метод; по умолчанию — отказ.
+        Решение «менять ли живой пост» принимает человек в Mini App, не агент.
+        """
+        raise PublishError("Эта платформа не поддерживает правку опубликованных постов")

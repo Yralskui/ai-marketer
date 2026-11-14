@@ -15,6 +15,21 @@ DATA_DIR = BASE_DIR / "data"
 IMAGES_DIR = DATA_DIR / "images"
 
 
+def parse_vk_communities(value: str) -> dict[int, str]:
+    """«123:ключ,456:ключ» → {123: «ключ», 456: «ключ»}. Ключи в сообщениях об ошибках не пишем."""
+    tokens: dict[int, str] = {}
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        group, separator, token = entry.partition(":")
+        group = group.strip().lstrip("-")
+        if not separator or not group.isdecimal() or not token.strip():
+            raise ValueError("VK_COMMUNITIES: ожидается «<id сообщества>:<ключ>», через запятую")
+        tokens[int(group)] = token.strip()
+    return tokens
+
+
 class Settings(BaseSettings):
     """Все настройки проекта. Описание каждой переменной — в `.env.example`."""
 
@@ -72,6 +87,25 @@ class Settings(BaseSettings):
     llm_price_input_per_1m: float = 15.0
     llm_price_output_per_1m: float = 60.0
     image_price: float = 4.0
+
+    # --- ВКонтакте ---
+    # Сообщества и ключи доступа: «<id сообщества>:<ключ>», несколько — через запятую.
+    # Ключи — секреты, хранятся только в .env; сообщество компании выбирается в Mini App.
+    vk_communities: str = ""
+    vk_api_version: str = "5.199"
+    # Бизнес-аккаунт ВК с подтверждённым профилем и токеном администратора: картинки, правка
+    # записей, просмотры. False — ключ сообщества: эти функции отключены, ошибок они не дают
+    vk_is_business_account: bool = False
+
+    @property
+    def vk_tokens(self) -> dict[int, str]:
+        return parse_vk_communities(self.vk_communities)
+
+    @field_validator("vk_communities")
+    @classmethod
+    def _check_vk_communities(cls, value: str) -> str:
+        parse_vk_communities(value)  # неверный формат — сразу понятная ошибка при запуске
+        return value
 
     # --- Хранилище ---
     database_url: str = ""

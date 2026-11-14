@@ -143,19 +143,33 @@ def timestamp(value: datetime) -> str:
 
 
 async def series(
-    session: AsyncSession, business_id: int, start: datetime, end: datetime, post_id: int | None
+    session: AsyncSession,
+    business_id: int,
+    start: datetime,
+    end: datetime,
+    post_id: int | None,
+    platform: Platform | None = None,
 ) -> dict:
+    """Ряды для графиков. `platform` — только эта соцсеть; None — все, с пометкой «где какая»."""
+    channel_filter = [Channel.business_id == business_id, ChannelSnapshot.hour.between(start, end)]
+    if platform is not None:
+        channel_filter.append(Channel.platform == platform)
     channels: dict[int, dict] = {}
     for channel, point in (
         await session.execute(
             select(Channel, ChannelSnapshot)
             .join(ChannelSnapshot)
-            .where(Channel.business_id == business_id, ChannelSnapshot.hour.between(start, end))
+            .where(*channel_filter)
             .order_by(ChannelSnapshot.hour, Channel.id)
         )
     ).all():
         group = channels.setdefault(
-            channel.id, {"name": channel.title or channel.external_id, "points": []}
+            channel.id,
+            {
+                "name": channel.title or channel.external_id,
+                "platform": Platform(channel.platform).value,
+                "points": [],
+            },
         )
         group["points"].append([timestamp(point.hour), point.subscribers])
 
@@ -181,19 +195,20 @@ async def series(
                 )
             ).all()
         ]
+    post_filter = [Post.business_id == business_id, exists().where(PostSnapshot.post_id == Post.id)]
+    if platform is not None:
+        post_filter.append(Post.platform == platform)
     available_posts = (
         await session.execute(
-            select(Post.id, Post.topic)
-            .where(
-                Post.business_id == business_id,
-                exists().where(PostSnapshot.post_id == Post.id),
-            )
-            .order_by(Post.id.desc())
+            select(Post.id, Post.topic, Post.platform).where(*post_filter).order_by(Post.id.desc())
         )
     ).all()
     return {
         "channels": list(channels.values()),
-        "posts": [{"id": id_, "topic": topic} for id_, topic in available_posts],
+        "posts": [
+            {"id": id_, "topic": topic, "platform": Platform(kind).value}
+            for id_, topic, kind in available_posts
+        ],
         "points": post_points,
     }
 

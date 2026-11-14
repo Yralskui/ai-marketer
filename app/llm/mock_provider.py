@@ -171,10 +171,21 @@ def _route(text: str) -> tuple[str, dict[str, Any]] | None:
     if any(w in low for w in POST_WORDS):
         return "create_post_draft", {
             "topic": _extract_topic(text),
-            "platform": "telegram",
+            "platforms": _mentioned_platforms(low),
             "with_image": any(w in low for w in IMAGE_WORDS),
         }
     return None
+
+
+def _mentioned_platforms(low: str) -> list[str]:
+    result = []
+    if re.search(r"телеграм|телега|\bтг\b|telegram", low):
+        result.append("telegram")
+    if re.search(r"вконтакте|\bвк\b|\bvk\b", low):
+        result.append("vk")
+    if re.search(r"и туда и туда|везде|во все|в обе|обе соцсет", low):
+        result = ["telegram", "vk"]
+    return result
 
 
 def _extract_topic(text: str) -> str:
@@ -202,6 +213,8 @@ def _summarize_tool_result(tool_name: str, content: str) -> str:
     if isinstance(data, dict) and data.get("status") == "in_development":
         return data.get("message", "Эта функция пока в разработке.")
 
+    if isinstance(data, dict) and data.get("needs_platform_choice"):
+        return data["message"]
     if tool_name in ("create_post_draft", "revise_post"):
         return (
             f"Готово! Черновик #{data.get('post_id')} отправлен вам на согласование — "
