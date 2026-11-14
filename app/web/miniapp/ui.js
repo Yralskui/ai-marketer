@@ -1026,8 +1026,15 @@ function postCard(post) {
     const excerpt = postBody(post);
     if (excerpt) card.append(el("p", excerpt, "post-excerpt"));
     const actions = el("div", undefined, "row card-actions");
-    if (post.status === "pending_approval") {
-        actions.append(button("Утвердить", () => postAction(post, "approve", {}, "Пост утверждён"), "primary small", "check"));
+    // «Утвердить» только одобряет пост, наружу он не уходит — поэтому главная кнопка карточки
+    // именно «Опубликовать», как все и ожидают
+    if (["pending_approval", "approved", "failed"].includes(post.status)) {
+        const where = post.platform === "vk" ? "во ВКонтакте" : "в канал";
+        actions.append(button(post.status === "failed" ? "Повторить" : "Опубликовать", async () => {
+            if (await confirmAction("Опубликовать этот пост " + where + " сейчас?")) {
+                return postAction(post, "publish", {}, "Пост отправлен " + where);
+            }
+        }, "primary small", "send"));
     }
     const open = button(post.status === "pending_approval" ? "Посмотреть" : "Открыть", () => postSheet(post), "small");
     actions.append(open);
@@ -1127,7 +1134,7 @@ function postSheet(post) {
         }, "primary", "send"));
     }
     if (post.status === "pending_approval") {
-        primary.append(button("Утвердить без даты", () => postAction(post, "approve", {}, "Пост утверждён"), undefined, "check"));
+        primary.append(button("Только утвердить (опубликую позже)", () => postAction(post, "approve", {}, "Пост утверждён, но ещё не опубликован"), undefined, "check"));
     }
     if (primary.childElementCount) content.append(primary);
 
