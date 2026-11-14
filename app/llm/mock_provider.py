@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Any
 
 from app.llm.base import LLMProvider, LLMResponse, Message, ToolCall
-from app.llm.post_templates import render_post
+from app.llm.post_templates import next_topics, render_post
 
 IMAGE_WORDS = ("картин", "фото", "изображ", "иллюстрац", "визуал")
 REVISE_WORDS = ("перепиш", "измени", "исправ", "короч", "сократ", "добав", "убер", "поправ")
@@ -100,25 +101,16 @@ class MockLLMProvider(LLMProvider):
         if task == "content_plan":
             days = int(_line_value(last_user, "Дней", "7"))
             count = int(_line_value(last_user, "Тем", "5"))
-            rubrics = (
-                "Знакомство с компанией",
-                "Популярный вопрос клиентов",
-                "Как создаётся продукт",
-                "Выбор и применение продукта",
-                "Люди и команда",
-                "Разбор типичной ошибки",
-                "История развития",
-                "Советы по уходу",
-                "Проект из практики",
-                "Термин отрасли",
-                "Тенденции отрасли",
-                "Ответы на вопросы аудитории",
-            )
+            topics = next_topics(last_user, count, seed=date.today().toordinal())
             items = [
-                {"day": index * (days - 1) // (count - 1), "topic": rubric, "rubric": "О компании"}
-                for index, rubric in enumerate(rubrics[:count])
+                {"day": index * (days - 1) // (count - 1), "topic": topic, "rubric": rubric}
+                for index, (topic, rubric) in enumerate(topics)
             ]
             return LLMResponse(content=json.dumps({"items": items}, ensure_ascii=False))
+        if task == "suggest_topic":
+            system = _last_content(messages, "system")
+            ((topic, _),) = next_topics(system, 1, seed=date.today().toordinal())
+            return LLMResponse(content=topic)
         if task == "extract_profile" or json_mode:
             return LLMResponse(content=json.dumps(_extract_profile(last_user), ensure_ascii=False))
         if tools:

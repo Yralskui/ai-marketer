@@ -246,7 +246,9 @@ def _find_product(topic: str) -> str | None:
     return None
 
 
-def _pick(templates: tuple[Template, ...], topic: str, fallback: Template) -> Template:
+def _pick(
+    templates: tuple[Template, ...], topic: str, fallback: Template | None
+) -> Template | None:
     low = topic.lower().replace("ё", "е")
     scored = [(sum(k.replace("ё", "е") in low for k in t.keywords), t) for t in templates]
     best = max(score for score, _ in scored)
@@ -255,6 +257,23 @@ def _pick(templates: tuple[Template, ...], topic: str, fallback: Template) -> Te
     candidates = [t for score, t in scored if score == best]
     # Одинаковые темы дают один и тот же шаблон, разные — разные
     return candidates[int(sha256(topic.encode()).hexdigest(), 16) % len(candidates)]
+
+
+def _occasion(topic: str) -> Template | None:
+    """Шаблон повода (день рождения завода, праздник) — только при явном совпадении."""
+    low = topic.lower().replace("ё", "е")
+    best, found = 0, None
+    for template in OCCASION_TEMPLATES:
+        score = sum(k.replace("ё", "е") in low for k in template.keywords)
+        if score > best:
+            best, found = score, template
+    # «день строителя»/«новый год» узнаются по одному слову, дни рождения — по двум
+    single = (
+        found is not None
+        and len(found.keywords) == 3
+        and found.keywords[0].startswith(("день строител", "новый год"))
+    )
+    return found if best >= 2 or (best == 1 and single) else None
 
 
 def _tag(value: str) -> str:
@@ -268,7 +287,10 @@ def render_post(topic: str, business: str) -> str:
     salavat = "салаватстекл" in business.lower()
     if salavat:
         product = _find_product(topic)
-        if product:
+        occasion = _occasion(topic)
+        if occasion is not None:
+            template = occasion
+        elif product:
             template = PRODUCT_TEMPLATE
         else:
             template = _pick(SALAVATSTEKLO, topic, SALAVATSTEKLO_DEFAULT)
@@ -282,3 +304,99 @@ def render_post(topic: str, business: str) -> str:
         product=product or "",
         tag=_tag(business),
     )
+
+
+# ----------------------------------------------------------------- поводы (календарь компании)
+
+OCCASION_TEMPLATES: tuple[Template, ...] = (
+    Template(
+        ("саратовстройстекл", "15 мая", "1958"),
+        "15 мая — день рождения АО «Саратовстройстекло».\n\n"
+        "История завода началась 15 мая 1958 года. С 2010 года он работает вместе с "
+        "АО «Салаватстекло», а сегодня входит в группу из трёх заводов САЛАВАТСТЕКЛО.\n\n"
+        "Поздравляем коллег и благодарим партнёров за доверие!\n\n"
+        "#САЛАВАТСТЕКЛО #деньрождения",
+    ),
+    Template(
+        ("30 июня", "1962", "салаватстекло»"),
+        "30 июня — день рождения АО «Салаватстекло».\n\n"
+        "30 июня 1962 года начал работу завод в Салавате. За эти годы пройден путь от "
+        "технического стекла до одного из крупнейших производителей листового стекла в "
+        "России.\n\n"
+        "Поздравляем коллег и благодарим всех, кто работает с нами!\n\n"
+        "#САЛАВАТСТЕКЛО #деньрождения",
+    ),
+    Template(
+        ("каспий", "30 октября", "2013"),
+        "30 октября — день рождения ООО «Салаватстекло Каспий».\n\n"
+        "Самый молодой в России завод по производству листового стекла начал работу "
+        "30 октября 2013 года, а в 2021 году вошёл в группу компаний САЛАВАТСТЕКЛО.\n\n"
+        "Поздравляем команду в Дагестане!\n\n"
+        "#САЛАВАТСТЕКЛО #деньрождения",
+    ),
+    Template(
+        ("день строител", "днем строител", "днём строител"),
+        "С Днём строителя!\n\n"
+        "В каждом светлом доме и современном фасаде есть труд строителей, архитекторов и "
+        "производителей материалов. САЛАВАТСТЕКЛО поздравляет всех, кто создаёт облик "
+        "городов, — спасибо за вашу работу!\n\n"
+        "#САЛАВАТСТЕКЛО #деньстроителя",
+    ),
+    Template(
+        ("новый год", "новым годом", "новогод"),
+        "С наступающим Новым годом!\n\n"
+        "Спасибо партнёрам, клиентам и коллегам за этот год. Пусть следующий будет светлым, "
+        "как хорошее стекло, и прозрачным, как честные отношения.\n\n"
+        "Команда САЛАВАТСТЕКЛО\n\n"
+        "#САЛАВАТСТЕКЛО #новыйгод",
+    ),
+)
+
+
+# ----------------------------------------------------------------- темы для плана и автопостов
+
+SALAVATSTEKLO_TOPICS: tuple[tuple[str, str], ...] = (
+    ("История компании: с 1958 года до наших дней", "История"),
+    ("MultiComfort° для фасадов бизнес-центров", "Продукт"),
+    ("Наша команда: люди, которые знают стекло", "Люди"),
+    ("Партнёрам и дилерам: как начать сотрудничество", "Партнёрам"),
+    ("Стекло для окон и стеклопакетов", "Продукт"),
+    ("Экологичность продукции", "Ценности"),
+    ("Зеркала и стекло в интерьере", "Продукт"),
+    ("Испытания печей закалки для переработчиков", "Партнёрам"),
+    ("Миссия: делать мир светлее", "О компании"),
+    ("Безопасность на производстве", "Ценности"),
+    ("Три завода — одна команда", "О компании"),
+    ("Comfort° Silver-grey 40 для фасадов", "Продукт"),
+)
+
+GENERIC_TOPICS: tuple[tuple[str, str], ...] = (
+    ("Знакомство с компанией", "О компании"),
+    ("Популярный вопрос клиентов", "Вопросы"),
+    ("Как мы работаем", "О компании"),
+    ("Люди и команда", "Люди"),
+    ("Полезный совет клиентам", "Советы"),
+    ("Новинки и обновления", "Новости"),
+    ("История компании", "О компании"),
+    ("Проект из практики", "Кейсы"),
+    ("Специальное предложение", "Акции"),
+    ("Ответы на частые вопросы", "Вопросы"),
+    ("Закулисье: как создаётся продукт", "О компании"),
+    ("Планы на ближайшее время", "Новости"),
+)
+
+
+def next_topics(context: str, count: int, seed: int = 0) -> list[tuple[str, str]]:
+    """Темы по кругу, без тех, что уже встречаются в контексте (недавние посты, план).
+
+    `context` — текст с профилем и недавними темами: по нему же определяется компания.
+    """
+    low = context.casefold()
+    pool = SALAVATSTEKLO_TOPICS if "салаватстекл" in low else GENERIC_TOPICS
+    fresh = [item for item in pool if item[0].casefold() not in low] or list(pool)
+    start = seed % len(fresh)
+    # Сначала новые темы, потом уже бывшие — так темы в одном плане не повторяются
+    ordered = fresh[start:] + fresh[:start] + [item for item in pool if item not in fresh]
+    while len(ordered) < count:
+        ordered += ordered
+    return ordered[:count]
