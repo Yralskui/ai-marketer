@@ -89,9 +89,9 @@ class EventType(StrEnum):
     POST_APPROVED = "post_approved"
     POST_REJECTED = "post_rejected"
     POST_SCHEDULED = "post_scheduled"
+    POST_UNSCHEDULED = "post_unscheduled"
     POST_PUBLISHED = "post_published"
     POST_FAILED = "post_failed"
-    POST_DELETED = "post_deleted"
     PROFILE_UPDATED = "profile_updated"
     SOURCE_ADDED = "source_added"
     AGENT_ERROR = "agent_error"
@@ -224,7 +224,7 @@ class PostRevision(TimestampMixin, Base):
 
 
 class ContentPlan(TimestampMixin, Base):
-    """Заготовка под модуль контент-плана (поток A)."""
+    """Контент-план компании на заданный период."""
 
     __tablename__ = "content_plans"
 

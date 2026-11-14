@@ -7,7 +7,7 @@
      "tool_calls": [...], "tool_call_id": "..."}
 Формат инструментов — OpenAI function tools:
     {"type": "function", "function": {"name", "description", "parameters"}}
-Провайдер, у которого другой формат (YandexGPT, GigaChat), конвертирует внутри себя.
+Провайдер с другим форматом конвертирует сообщения внутри адаптера.
 """
 
 from __future__ import annotations

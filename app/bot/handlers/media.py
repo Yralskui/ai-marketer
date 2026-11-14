@@ -21,7 +21,7 @@ from app.container import AppContainer
 from app.db.models import Business, PostStatus, User
 from app.db.repositories import MediaRepo
 from app.llm.base import LLMError
-from app.services import accounts, approval, media
+from app.services import accounts, approval, media, posts
 from app.services.media import MediaError
 from app.services.posts import InvalidTransitionError
 
@@ -58,9 +58,14 @@ async def _make_post(
         photo = await media.get_photo(session, business, media_id)
         async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
             post = await media.create_post_with_photo(
-                session, container.llm, container.images, business, photo, topic
+                session,
+                container.llm,
+                container.images,
+                business,
+                photo,
+                topic,
             )
-    except (MediaError, LLMError) as exc:
+    except (MediaError, LLMError, posts.MissingPostInformation) as exc:
         await message.answer(escape(str(exc)))
         return
     await approval.submit_for_approval(session, post, container.notifier, message.chat.id)

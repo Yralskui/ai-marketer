@@ -5,8 +5,7 @@
 
 - "agent"           — по ключевым словам выбирает инструмент; после результата
                       инструмента пишет короткий итоговый ответ;
-- "write_post"      — пост из библиотеки шаблонов по строке «Тема: ...» (для
-                      САЛАВАТСТЕКЛО — по брендбуку, см. post_templates.py);
+- "write_post"      — шаблонный пост по строке «Тема: ...» из user-сообщения;
 - "revise_post"     — простые правки («короче», «эмодзи», «подробнее», ...);
 - "extract_profile" — JSON-профиль бизнеса из сырого текста эвристиками.
 
@@ -22,7 +21,6 @@ import re
 from typing import Any
 
 from app.llm.base import LLMProvider, LLMResponse, Message, ToolCall
-from app.llm.post_templates import render_post
 
 IMAGE_WORDS = ("картин", "фото", "изображ", "иллюстрац", "визуал")
 REVISE_WORDS = ("перепиш", "измени", "исправ", "короч", "сократ", "добав", "убер", "поправ")
@@ -45,10 +43,98 @@ class MockLLMProvider(LLMProvider):
         task: str | None = None,
     ) -> LLMResponse:
         last_user = _last_content(messages, "user")
+        current = last_user.rsplit("\n\nТекущий запрос:\n", 1)[-1]
+        follows_draft = bool(
+            "assistant: Черновик №" in last_user and current.casefold().startswith(REVISE_WORDS)
+        )
+        if task == "classify_intent":
+            call = _route(current)
+            low = current.casefold()
+            intent = {
+                "create_post_draft": "create_post",
+                "revise_post": "revise_post",
+                "create_content_plan": "plan",
+                "get_analytics": "analytics",
+                "make_report": "report",
+                "list_posts": "list_posts",
+            }.get(call[0] if call else "", "company")
+            if follows_draft and (not call or call[0] == "revise_post"):
+                intent = "revise_post"
+            elif any(word in low for word in ("можно ли", "как подключить", "поддерживает")):
+                intent = "integration"
+            elif low.startswith("как ") or "что уме" in low or "что это за проект" in low:
+                intent = "help"
+            elif re.search(
+                r"(опубликуй|запланируй|отмени|перенеси).*?(пост|черновик)\s*[№#]?\s*\d+", low
+            ):
+                intent = "publish"
+            return LLMResponse(content=json.dumps({"intent": intent}))
+        if task and task.startswith("args_"):
+            call = _route(current)
+            args = call[1] if call else {}
+            if task == "args_revise_post" and follows_draft and not args:
+                args = {"instruction": current}
+            return LLMResponse(content=json.dumps(args, ensure_ascii=False))
+        if task == "publish_intent":
+            post = re.search(r"(?:пост|черновик)\s*[№#]?\s*(\d+)", current, re.I)
+            action = (
+                "cancel"
+                if "отмени" in current.lower()
+                else "schedule"
+                if any(word in current.lower() for word in ("запланируй", "перенеси"))
+                else "publish"
+            )
+            when = last_user[post.end() :].strip() if post else ""
+            return LLMResponse(
+                content=json.dumps(
+                    {"action": action, "post_id": int(post[1]) if post else None, "when": when},
+                    ensure_ascii=False,
+                )
+            )
+        if task == "platform_help":
+            return LLMResponse(
+                content=last_user.partition("\n\nВопрос:\n")[0].removeprefix("Справка:\n")
+            )
+        if task in {"result_list_posts", "result_analytics"}:
+            tool = "list_posts" if task == "result_list_posts" else "get_analytics"
+            return LLMResponse(content=_summarize_tool_result(tool, last_user))
+        if task == "post_critique":
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "facts": "Есть замеры просмотров публикации.",
+                        "hypothesis": "На отклик могла повлиять формулировка первого абзаца.",
+                        "next": "Проверьте другой заголовок в следующем посте на похожую тему.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
         if task == "write_post":
             return LLMResponse(content=_write_post(last_user))
         if task == "revise_post":
             return LLMResponse(content=_revise_post(last_user))
+        if task == "content_plan":
+            days = int(_line_value(last_user, "Дней", "7"))
+            count = int(_line_value(last_user, "Тем", "5"))
+            rubrics = (
+                "Знакомство с компанией",
+                "Популярный вопрос клиентов",
+                "Как создаётся продукт",
+                "Выбор и применение продукта",
+                "Люди и команда",
+                "Разбор типичной ошибки",
+                "История развития",
+                "Советы по уходу",
+                "Проект из практики",
+                "Термин отрасли",
+                "Тенденции отрасли",
+                "Ответы на вопросы аудитории",
+            )
+            items = [
+                {"day": index * (days - 1) // (count - 1), "topic": rubric, "rubric": "О компании"}
+                for index, rubric in enumerate(rubrics[:count])
+            ]
+            return LLMResponse(content=json.dumps({"items": items}, ensure_ascii=False))
         if task == "extract_profile" or json_mode:
             return LLMResponse(content=json.dumps(_extract_profile(last_user), ensure_ascii=False))
         if tools:
@@ -145,6 +231,9 @@ def _summarize_tool_result(tool_name: str, content: str) -> str:
             f"Готово! Черновик #{data.get('post_id')} отправлен вам на согласование — "
             "выберите действие кнопками под ним."
         )
+    if tool_name == "create_content_plan":
+        lines = [f"{item['date']} · {item['topic']}" for item in data.get("items", [])]
+        return "Контент-план готов. Утвердите его на главной в Mini App.\n" + "\n".join(lines)
     if tool_name == "list_posts":
         posts = data.get("posts", [])
         if not posts:
@@ -195,10 +284,20 @@ def _hashtag(value: str) -> str:
 
 
 def _write_post(user_msg: str) -> str:
-    """Пост из библиотеки шаблонов (app/llm/post_templates.py) по теме и названию компании."""
     topic = _line_value(user_msg, "Тема", "новости компании")
     business = _line_value(user_msg, "Название бизнеса", "Мы")
-    return render_post(topic, business)
+    title = topic[:1].upper() + topic[1:]
+    return (
+        f"✨ {title}\n\n"
+        f"{business} делится новостью: {topic}. "
+        "Мы подготовили это специально для вас — с заботой о качестве и деталях.\n\n"
+        "Что вас ждёт:\n"
+        "• внимательный подход к каждому клиенту\n"
+        "• честные цены и понятные условия\n"
+        "• приятные бонусы для постоянных гостей\n\n"
+        "Напишите нам в личные сообщения — расскажем подробности!\n\n"
+        f"#{_hashtag(topic)} #{_hashtag(business)}"
+    )
 
 
 _EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿]️?")

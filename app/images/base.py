@@ -8,6 +8,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from app.images import ImageGenerationError
+
 
 class ImageProvider(ABC):
     name: str = "base"
@@ -19,3 +21,7 @@ class ImageProvider(ABC):
     @abstractmethod
     async def generate(self, prompt: str, *, size: tuple[int, int] = (1024, 1024)) -> Path:
         """Создаёт изображение по описанию и возвращает путь к файлу (PNG/JPG)."""
+
+    async def edit(self, prompt: str, references: list[Path]) -> Path:
+        """Создаёт изображение по промпту и переданным референсам."""
+        raise ImageGenerationError("Провайдер не поддерживает изображения на входе.")

@@ -79,9 +79,12 @@ class Database:
         после изменения моделей не приходилось удалять базу с данными. Переименования и
         удаления колонок так не делаются — для них нужны миграции (Alembic, B9).
         """
-        from app.db import models  # noqa: F401  — регистрирует модели в metadata
+        from app.db import knowledge, models, publications  # noqa: F401  — регистрирует модели в metadata
 
         async with self.engine.begin() as conn:
+            if self.engine.dialect.name == "postgresql":
+                await conn.execute(text("SELECT pg_advisory_xact_lock(418023)"))
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
             if self.engine.dialect.name == "sqlite":
                 await conn.run_sync(_add_missing_columns)

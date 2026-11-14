@@ -12,8 +12,9 @@ from aiogram.types import TelegramObject, Update
 from aiogram.types import User as TgUser
 
 from app.bot import texts
-from app.services.accounts import resolve_account
-from app.services.usage import usage_scope
+from app.db.models import UserRole
+from app.db.repositories import UserRepo
+from app.services.accounts import is_admin, resolve_account
 
 if TYPE_CHECKING:
     from app.container import AppContainer
@@ -37,7 +38,7 @@ class DbSessionMiddleware(BaseMiddleware):
     Доступ есть у администраторов (ALLOWED_USER_IDS) и у клиентов, подключённых по
     приглашению. Остальным бот сообщает их ID и дальше обновление не пускает.
 
-    В хендлерах доступны: session, db_user, business, account, container.
+    В хендлерах доступны: session, db_user, container.
     Коммит — после успешного хендлера, при исключении — откат.
     """
 
@@ -62,27 +63,37 @@ class DbSessionMiddleware(BaseMiddleware):
                 await session.commit()
                 return result
 
+        settings = self.container.settings
+        if settings.telegram_allowlist_only and tg_user.id not in settings.allowed_ids:
+            await _deny(event, tg_user)
+            return None
         async with self.container.db.sessionmaker() as session:
-            account = await resolve_account(
-                session,
-                self.container.settings,
-                tg_user.id,
-                tg_user.full_name,
-                start_payload=start_payload(event),
-            )
-            if account is None:
+            payload = start_payload(event)
+            if payload:
+                await resolve_account(
+                    session,
+                    self.container.settings,
+                    tg_user.id,
+                    tg_user.full_name,
+                    start_payload=payload,
+                )
+            user = await UserRepo(session).get_by_telegram_id(tg_user.id)
+            if tg_user.id in self.container.settings.allowed_ids and user is None:
+                user = await UserRepo(session).get_or_create(
+                    tg_user.id, tg_user.full_name, role=UserRole.ADMIN
+                )
+            if (
+                user is None
+                or not user.is_active
+                or (is_admin(user) and tg_user.id not in self.container.settings.allowed_ids)
+            ):
                 await session.rollback()
                 await _deny(event, tg_user)
                 return None
-
             data["session"] = session
-            data["account"] = account
-            data["db_user"] = account.user
-            data["business"] = account.business
+            data["db_user"] = user
             try:
-                # Все AI-расходы внутри обновления — на текущую компанию
-                async with usage_scope(session, account.business.id):
-                    result = await handler(event, data)
+                result = await handler(event, data)
             except Exception:
                 await session.rollback()
                 raise

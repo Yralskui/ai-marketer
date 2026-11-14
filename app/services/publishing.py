@@ -16,10 +16,25 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Channel, EventType, Platform, Post, PostStatus
+from app.db.models import (
+    Channel,
+    ContentPlanItem,
+    ContentPlanItemStatus,
+    EventType,
+    Platform,
+    Post,
+    PostStatus,
+)
+from app.db.publications import PostAttachments
 from app.db.repositories import ChannelRepo, EventLogRepo, PostRepo
 from app.publishers.base import Publisher, PublishError, PublishResult
-from app.services.posts import PUBLISHABLE_STATUSES, ensure_publishable, transition
+from app.services.post_history import RevisionSource, record_decision, save_revision
+from app.services.posts import (
+    PLATFORM_HARD_LIMITS,
+    PUBLISHABLE_STATUSES,
+    ensure_publishable,
+    transition,
+)
 from app.utils.time import utcnow
 
 log = logging.getLogger(__name__)
@@ -83,16 +98,73 @@ class PublishingService:
         post.published_at = utcnow()
         post.error = None
         transition(post, PostStatus.PUBLISHED)
-        await events.log(
+        if post.plan_item_id is not None:
+            item = await session.get(ContentPlanItem, post.plan_item_id)
+            if item is not None:
+                item.status = ContentPlanItemStatus.PUBLISHED
+        event = await events.log(
             EventType.POST_PUBLISHED,
             result.url or "",
             business_id=post.business_id,
             post_id=post.id,
-            payload={"dry_run": result.dry_run, "platform": Platform(post.platform).value},
+            payload={
+                "dry_run": result.dry_run,
+                "platform": Platform(post.platform).value,
+                **({"note": result.note} if result.note else {}),
+            },
         )
+        await record_decision(session, post, event)
         await session.commit()
         log.info("Пост #%s опубликован (dry_run=%s) %s", post.id, result.dry_run, result.url or "")
         return PublishOutcome(ok=True, post=post, result=result)
+
+    async def edit_published(
+        self, session: AsyncSession, post: Post, text: str, *, author_id: int | None = None
+    ) -> Post:
+        """Меняет текст уже опубликованного поста — в соцсети и у нас, с записью в историю.
+
+        Статус поста не меняется (машина состояний не затронута). Это явное действие человека
+        в Mini App: у агента такого инструмента нет. Ошибка соцсети — PublishError, пост цел.
+        """
+        if post.status != PostStatus.PUBLISHED:
+            raise ValueError("Править можно только опубликованный пост")
+        text = text.strip()
+        if not text:
+            raise ValueError("Текст поста не может быть пустым")
+        platform = Platform(post.platform)
+        limit = PLATFORM_HARD_LIMITS[platform]
+        if len(text) > limit:
+            raise ValueError(f"Текст длиннее лимита платформы: {limit} символов")
+        if text == post.text:
+            return post
+        # В режиме dry-run и для «пробных» публикаций в соцсеть ничего не уходило
+        if not (self.dry_run or (post.external_id or "").startswith("dry-run-")):
+            publisher = self.get_publisher(platform)
+            if publisher is None:
+                raise PublishError(f"Нет публикатора для платформы {platform.value}")
+            channel = await ChannelRepo(session).get(post.channel_id) if post.channel_id else None
+            if (
+                channel is None
+                or channel.business_id != post.business_id
+                or channel.platform != platform
+            ):
+                raise PublishError("Канал публикации не найден")
+            await publisher.edit(post, channel, text)
+        post.text = text
+        await save_revision(
+            session,
+            post,
+            RevisionSource("published_edit", author_id=author_id),
+            instruction="Правка опубликованного поста",
+        )
+        await EventLogRepo(session).log(
+            EventType.POST_REVISED,
+            "правка опубликованного поста",
+            business_id=post.business_id,
+            post_id=post.id,
+        )
+        await session.flush()
+        return post
 
     async def _do_publish(self, session: AsyncSession, post: Post) -> PublishResult:
         if self.dry_run:
@@ -107,6 +179,8 @@ class PublishingService:
             raise PublishError(
                 "Канал для публикации не настроен — подключите его командой /channel"
             )
+        attachments = await session.get(PostAttachments, post.id)
+        post.delivery_media = attachments.items if attachments else None
         return await publisher.publish(post, channel)
 
     async def _resolve_channel(self, session: AsyncSession, post: Post) -> Channel | None:

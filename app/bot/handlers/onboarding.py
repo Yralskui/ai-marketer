@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from html import escape
+from pathlib import Path
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
 from aiogram.utils.chat_action import ChatActionSender
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,11 +20,23 @@ from app.bot import texts
 from app.bot.keyboards import OnboardingCb, onboarding_keyboard
 from app.bot.states import OnboardingStates
 from app.container import AppContainer
-from app.db.models import Business, SourceType
-from app.ingestion.documents import MAX_DOCUMENT_BYTES, UnsupportedDocumentError, extract_text_async
+from app.db.models import Business, SourceType, User
+from app.ingestion.documents import MAX_DOCUMENT_BYTES
+from app.ingestion.profile_files import (
+    PROFILE_FILE_EXTENSIONS,
+    ProfileFileFormatError,
+    validate_profile_file,
+)
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, find_url, pages_to_text
 from app.llm.base import LLMError
 from app.services import business_profile
+from app.services.document_uploads import (
+    DocumentQuotaError,
+    ImageLimitError,
+    remaining_bytes,
+    save_document,
+    stage_document,
+)
 
 log = logging.getLogger(__name__)
 router = Router(name="onboarding")
@@ -69,26 +84,74 @@ async def on_done(
         await _finish(callback.message, state, session, business, container, bot)
 
 
+@router.message(OnboardingStates.collecting, Command("upload"))
+async def cmd_upload(
+    message: Message, db_user: User, business: Business, container: AppContainer
+) -> None:
+    if not container.settings.upload_public_url:
+        await message.answer(texts.UPLOAD_DISABLED)
+        return
+    token = container.upload_links.issue(db_user.id, business.id)
+    link = f"{container.settings.upload_public_url}/upload#{token}"
+    await message.answer(
+        texts.UPLOAD_LINK.format(link=escape(link, quote=True)),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+
+
 @router.message(OnboardingStates.collecting, F.document)
 async def on_document(
-    message: Message, session: AsyncSession, business: Business, bot: Bot
+    message: Message,
+    session: AsyncSession,
+    business: Business,
+    db_user: User,
+    bot: Bot,
+    container: AppContainer,
 ) -> None:
     doc = message.document
     assert doc is not None
-    if doc.file_size and doc.file_size > MAX_DOCUMENT_BYTES:
-        await message.answer(texts.ONBOARDING_DOC_TOO_BIG)
-        return
     filename = doc.file_name or "document"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in PROFILE_FILE_EXTENSIONS:
+        await message.answer(texts.UPLOAD_UNSUPPORTED)
+        return
+    if doc.file_size and doc.file_size > await remaining_bytes(session, business.id):
+        await message.answer(texts.UPLOAD_QUOTA)
+        return
+    if doc.file_size and doc.file_size > MAX_DOCUMENT_BYTES:
+        await cmd_upload(message, db_user, business, container)
+        return
+
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-        buffer = await bot.download(doc)
-        try:
-            text = await extract_text_async(filename, buffer.read() if buffer else b"")
-        except UnsupportedDocumentError as exc:
-            await message.answer(texts.ONBOARDING_DOC_ERROR.format(error=escape(str(exc))))
-            return
-    await business_profile.add_source(session, business, SourceType.DOCUMENT, filename, text)
+        with stage_document(business.id) as path:
+            try:
+                await bot.download(doc, destination=path, timeout=60)
+            except TelegramBadRequest as exc:
+                if "file is too big" not in str(exc).lower():
+                    raise
+                await cmd_upload(message, db_user, business, container)
+                return
+            size = path.stat().st_size
+            if size > MAX_DOCUMENT_BYTES:
+                await cmd_upload(message, db_user, business, container)
+                return
+            if not size:
+                await message.answer(texts.UPLOAD_EMPTY)
+                return
+            try:
+                await asyncio.to_thread(validate_profile_file, filename, path)
+                await save_document(session, business, filename, path, storage=container.storage)
+            except ImageLimitError as exc:
+                await message.answer(str(exc))
+                return
+            except DocumentQuotaError:
+                await message.answer(texts.UPLOAD_QUOTA)
+                return
+            except ProfileFileFormatError:
+                await message.answer(texts.UPLOAD_UNSUPPORTED)
+                return
     await message.answer(
-        texts.ONBOARDING_DOC_SAVED.format(name=escape(filename), chars=len(text)),
+        texts.ONBOARDING_DOC_SAVED.format(name=escape(filename), size=size),
         reply_markup=onboarding_keyboard(),
     )
 

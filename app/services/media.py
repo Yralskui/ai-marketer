@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import IMAGES_DIR
 from app.db.models import Business, EventType, MediaFile, Post, PostStatus
+from app.db.publications import PostAttachments
 from app.db.repositories import EventLogRepo, MediaRepo
 from app.images.base import ImageProvider
 from app.llm.base import LLMProvider
 from app.services import posts
+from app.services.post_history import RevisionSource, save_revision
 from app.services.posts import transition
 
 UPLOADS_DIR = IMAGES_DIR / "uploads"
@@ -83,27 +85,55 @@ async def create_post_with_photo(
     business: Business,
     media: MediaFile,
     topic: str,
+    *,
+    source: RevisionSource | None = None,
+    web_context: str = "",
 ) -> Post:
     """Новый черновик: текст пишет AI, картинка — фото клиента."""
     topic = topic.strip() or media.caption.strip() or "новый пост с нашим фото"
     if media.description:
         topic += f" (на фото: {media.description[:300]})"
-    post = await posts.create_draft(session, llm, images, business, topic, image_path=media.path)
+    post = await posts.create_draft(
+        session,
+        llm,
+        images,
+        business,
+        topic,
+        image_path=media.path,
+        media_id=media.id,
+        source=source or RevisionSource("photo", request_text=topic),
+        web_context=web_context,
+    )
     media.used_count += 1
     await session.flush()
     return post
 
 
-async def replace_post_photo(session: AsyncSession, post: Post, media: MediaFile) -> Post:
+async def replace_post_photo(
+    session: AsyncSession, post: Post, media: MediaFile, *, author_id: int | None = None
+) -> Post:
     """Ставит фото клиента в готовый черновик. Пост возвращается в draft — на согласование."""
     if post.business_id != media.business_id:
         raise MediaError("Фото и пост из разных компаний.")
     if post.status not in (PostStatus.DRAFT,):
         transition(post, PostStatus.DRAFT)  # бросит ошибку для published/rejected
+    attachments = await session.get(PostAttachments, post.id)
+    if attachments is not None:
+        await session.delete(attachments)
+        await session.flush()
     post.image_path = media.path
     post.scheduled_at = None
     post.error = None
     media.used_count += 1
+    await save_revision(
+        session,
+        post,
+        RevisionSource("photo", author_id=author_id),
+        instruction="Замена изображения",
+        image_change=True,
+        image_source="upload",
+        media_id=media.id,
+    )
     await EventLogRepo(session).log(
         EventType.POST_REVISED,
         "замена картинки на фото клиента",

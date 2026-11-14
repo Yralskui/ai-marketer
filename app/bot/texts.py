@@ -18,7 +18,7 @@ START = (
     "вашего согласия.\n\n"
     "{next_step}"
 )
-START_NEED_PROFILE = "Начнём со знакомства: нажмите «📚 Материалы» внизу и расскажите о бизнесе."
+START_NEED_PROFILE = "Начнём со знакомства: нажмите /onboarding и расскажите о бизнесе."
 START_READY = "Просто напишите задачу, например: <i>«напиши пост про осеннее меню»</i>."
 
 HELP = (
@@ -29,7 +29,7 @@ HELP = (
     "• Каждый пост сначала приходит черновиком с кнопками — без вашего «Опубликовать» "
     "ничего не выйдет.\n\n"
     "<b>Команды</b>\n"
-    "/onboarding — рассказать о бизнесе (текст, файлы PDF/DOCX/TXT, ссылка на сайт)\n"
+    "/onboarding — рассказать о бизнесе (текст, PDF, изображения, ссылка на сайт)\n"
     "/profile — профиль бизнеса\n"
     "/posts — последние посты и статусы\n"
     "/post N — открыть пост №N\n"
@@ -38,7 +38,6 @@ HELP = (
     "/report — отчёт: показатели, выводы и что сделать\n"
     "/photos — фотобанк: свои фото для постов (просто пришлите фото боту)\n"
     "/log — журнал действий по компании\n"
-    "/brand — бренд-гид: как AI пишет и рисует в стиле компании\n"
     "/status — диагностика\n"
     "/cancel — отменить текущее действие"
 )
@@ -50,7 +49,7 @@ ACCESS_DENIED = (
     "Ваш Telegram ID: <code>{user_id}</code>."
 )
 UNKNOWN_COMMAND = "Не знаю такой команды. Список команд — /help"
-UNSUPPORTED_MESSAGE = "Я понимаю текст и документы (PDF, DOCX, TXT). Подробнее — /help"
+UNSUPPORTED_MESSAGE = "Я понимаю текст, PDF и изображения. Подробнее — /help"
 DOCUMENT_OUTSIDE_ONBOARDING = (
     "Чтобы я изучил документ и добавил его в профиль бизнеса, сначала нажмите /onboarding."
 )
@@ -62,19 +61,34 @@ ONBOARDING_INTRO = (
     "Расскажите о вашем бизнесе — можно несколькими сообщениями:\n"
     "• текстом: чем занимаетесь, что продаёте, для кого, чем отличаетесь, каким тоном "
     "общаться и о чём нельзя писать;\n"
-    "• файлом: PDF, DOCX или TXT (презентация, меню, прайс);\n"
+    "• файлом: PDF или изображение (брендбук, меню, прайс);\n"
     "• ссылкой на сайт.\n\n"
     "Когда закончите — нажмите «Готово» или /done."
 )
 ONBOARDING_TEXT_SAVED = "✍️ Записал. Ещё что-нибудь? Когда закончите — «Готово»."
-ONBOARDING_DOC_SAVED = "📄 Прочитал «{name}» ({chars} символов). Ещё материалы или «Готово»?"
+ONBOARDING_DOC_SAVED = "📄 Сохранил «{name}» ({size} байт)."
 ONBOARDING_SITE_LOADING = "🌐 Читаю сайт {url} …"
 ONBOARDING_SITE_SAVED = (
     "🌐 Прочитал сайт: {pages} стр., {chars} символов. Ещё что-нибудь или «Готово»?"
 )
 ONBOARDING_SITE_ERROR = "Не получилось прочитать сайт: {error}"
 ONBOARDING_DOC_ERROR = "Не получилось прочитать файл: {error}"
-ONBOARDING_DOC_TOO_BIG = "Файл больше 20 МБ — Telegram не даёт боту его скачать."
+UPLOAD_LINK = (
+    'Для файла больше 20 МБ откройте <a href="{link}">форму загрузки</a>. '
+    "Ссылка действует 10 минут и рассчитана на одну попытку. "
+    "После загрузки вернитесь сюда. Новая ссылка — /upload."
+)
+UPLOAD_DISABLED = (
+    "Telegram не скачивает файлы больше 20 МБ. "
+    "Веб-загрузка пока не настроена. Пришлите документ частями до 20 МБ."
+)
+UPLOAD_QUOTA = "Документ не помещается в общий лимит профиля в 100 МБ."
+UPLOAD_UNSUPPORTED = (
+    "Принимаются PDF, Word (.docx), текстовые файлы (.txt, .md) и изображения. "
+    "Презентации экспортируйте в PDF."
+)
+UPLOAD_EMPTY = "Файл пуст."
+UPLOAD_SAVED = "📄 Документ из браузера добавлен к профилю: «{name}»."
 ONBOARDING_BUILDING = "🧠 Изучаю материалы и составляю профиль бизнеса…"
 ONBOARDING_NO_SOURCES = (
     "Пока нет ни одного материала — расскажите о бизнесе текстом, файлом или ссылкой."
@@ -110,7 +124,7 @@ PUBLISH_FAILED = (
     "⚠️ Не удалось опубликовать пост #{id}: {error}\nМожно попробовать снова: /post {id}"
 )
 
-POSTS_EMPTY = "Постов пока нет. Нажмите «✍️ Создать пост» или напишите: «пост про новинки»."
+POSTS_EMPTY = "Постов пока нет. Напишите, например: «напиши пост про новинки»."
 POSTS_HEADER = "<b>Последние посты</b>\n"
 POST_USAGE = "Укажите номер: /post 3"
 
@@ -138,12 +152,8 @@ def draft_card(
     *,
     channel: str | None = None,
     tz: tzinfo | None = None,
-    with_text: bool = True,
 ) -> str:
-    """Карточка на согласование: материал, площадка и время публикации (п. 3.5 ТЗ).
-
-    `with_text=False` — только шапка: текст уже показан выше как подпись к фото.
-    """
+    """Карточка на согласование: материал, площадка и время публикации (п. 3.5 ТЗ)."""
     header = DRAFT_HEADER.format(
         id=post.id,
         platform=PLATFORM_TITLES.get(post.platform, str(post.platform)),
@@ -155,8 +165,6 @@ def draft_card(
     else:
         when = "сразу после «Опубликовать» или в выбранное вами время"
     header += f"📣 Куда: {where}\n🕒 Когда: {when}\n\n"
-    if not with_text:
-        return DRAFT_CONTROLS + header.rstrip("\n")
     body = escape(post.text)
     limit = 4096 - len(header) - len(DRAFT_TRUNCATED) - 16
     if len(body) > limit:
@@ -171,8 +179,6 @@ def post_line(post: Post, tz: tzinfo) -> str:
         line += f" · на {format_local(post.scheduled_at, tz)}"
     if post.status == PostStatus.PUBLISHED and post.external_url:
         line += f' · <a href="{escape(post.external_url)}">ссылка</a>'
-    elif post.status == PostStatus.PUBLISHED and post.error == POST_DELETED_MARK:
-        line += f" · 🗑 {POST_DELETED_MARK}"
     if post.status == PostStatus.FAILED and post.error:
         line += f"\n    <i>{escape(post.error[:120])}</i>"
     return line
@@ -181,11 +187,7 @@ def post_line(post: Post, tz: tzinfo) -> str:
 def posts_list(posts: list[Post], tz: tzinfo) -> str:
     if not posts:
         return POSTS_EMPTY
-    return (
-        POSTS_HEADER
-        + "\n".join(post_line(p, tz) for p in posts)
-        + "\n\nНажмите на пост ниже, чтобы открыть."
-    )
+    return POSTS_HEADER + "\n".join(post_line(p, tz) for p in posts) + "\n\nОткрыть пост: /post N"
 
 
 def status_report(
@@ -490,97 +492,5 @@ PHOTOS_HEADER = (
 )
 
 
-# --- поток B ---------------------------------------------------- удобство и «готовый продукт»
-
-WORKING = "⏳ Работаю над задачей…"
-ASK_QUICK_EDIT = (
-    "✏️ Что поменять в посте #{id}? Выберите вариант или напишите своими словами, "
-    "например: «убери цену, добавь адрес»."
-)
-ASK_SCHEDULE_QUICK = (
-    "🕒 Когда опубликовать пост #{id}? Выберите время или напишите своё: "
-    "«в пятницу в 18:00», «25.11 12:30». Часовой пояс: {tz}."
-)
-DRAFT_CONTROLS = "👆 Так пост будет выглядеть в канале.\n\n"
-PUBLISH_FAILED_SHORT = "⚠️ Не удалось опубликовать пост #{id}: {error}"
-DELETE_CONFIRM = "🗑 Удалить пост #{id} из канала? Отменить это нельзя."
-DELETED_OK = "🗑 Пост #{id} удалён из канала."
-DELETE_FAILED = (
-    "Не получилось удалить: Telegram разрешает боту удалять посты только в первые 48 часов "
-    "и только при праве «Удаление сообщений»."
-)
-POST_DELETED_MARK = "удалён из канала"
-CHANNEL_PICK_HINT = (
-    "Нажмите «📣 Выбрать канал» внизу и выберите свой канал — я сам получу права "
-    "на публикацию. Ничего искать и копировать не нужно."
-)
-CHANNEL_PICKED_FAILED = "Не получилось подключить канал: {error}"
-BACK_TO_MENU = "Главное меню 👇"
-POSTS_FILTER_EMPTY = "В этом разделе пока пусто."
-
-
-def published_card(post: Post, channel: str | None, dry_run: bool) -> str:
-    topic = escape(post.topic[:80])
-    if dry_run:
-        return (
-            f"✅ <b>Пост #{post.id} «опубликован»</b> в режиме DRY-RUN — в канал ничего "
-            f"не ушло.\n<i>{topic}</i>"
-        )
-    where = f" в <code>{escape(channel)}</code>" if channel else ""
-    return f"✅ <b>Пост #{post.id} опубликован</b>{where}.\n<i>{topic}</i>"
-
-
-def closed_card(post: Post, status: str) -> str:
-    topic = escape(post.topic[:80] or post.text[:80])
-    return f"{status} <b>Пост #{post.id}</b>\n<i>{topic}</i>"
-
-
-def client_status(
-    *,
-    company: str,
-    channel: str,
-    counts: dict[PostStatus, int],
-    month_cost: str,
-) -> str:
-    """«Состояние» для клиента — без технических деталей."""
-    queue = counts.get(PostStatus.PENDING_APPROVAL, 0)
-    planned = counts.get(PostStatus.SCHEDULED, 0)
-    published = counts.get(PostStatus.PUBLISHED, 0)
-    return (
-        f"📊 <b>Состояние</b> · {escape(company)}\n\n"
-        f"📣 Канал: {channel}\n"
-        f"⏳ Ждут вашего решения: <b>{queue}</b>\n"
-        f"🕒 Запланировано: <b>{planned}</b>\n"
-        f"✅ Опубликовано всего: <b>{published}</b>\n"
-        f"💰 Расходы на AI в этом месяце: {month_cost}"
-    )
-
-
-# --- поток B ---------------------------------------------------- бренд-гид
-
-BRAND_HEADER = "🎨 <b>Бренд-гид</b> · {company}\nТак AI пишет посты и описывает картинки:\n\n"
-BRAND_EMPTY = (
-    "🎨 <b>Бренд-гид</b> · {company}\n\nПока пусто. Загрузите брендбук (PDF, DOCX, TXT) или "
-    "напишите правила: тон, как писать названия, что нельзя, стиль картинок, цвета — и AI "
-    "будет соблюдать их во всех постах."
-)
-BRAND_ASK_MATERIAL = (
-    "📄 Пришлите брендбук файлом (PDF, DOCX, TXT) или напишите правила текстом, например:\n"
-    "<i>«Тон деловой. Название пишем КАПСОМ. Никаких скидочных «только сегодня». "
-    "Картинки — светлые, архитектура и стекло. Цвета #196C7F, #DDE1E1»</i>."
-)
-BRAND_SAVED = "✅ Бренд-гид обновлён — теперь все посты и картинки следуют ему."
-BRAND_CLEARED = "🧹 Бренд-гид компании {company} очищен."
-BRAND_PRESET_APPLIED = "✨ Шаблон «{preset}» применён к компании {company}."
-BRAND_NOTHING_FOUND = "Не нашёл в материале правил бренда. Попробуйте описать их текстом."
-BRAND_NO_TEXT_IN_PDF = (
-    "В этом PDF нет текста — брендбук, похоже, свёрстан картинками. Напишите главные правила "
-    "текстом или пришлите DOCX/TXT."
-)
-BRAND_ISSUES = "\n\n⚠️ <b>Проверка бренд-гида:</b>\n"
-
-
-def brand_issues_block(issues: list[str]) -> str:
-    if not issues:
-        return ""
-    return BRAND_ISSUES + "\n".join(f"• {escape(i)}" for i in issues[:6])
+MINIAPP_OPEN = "В Маркетологе можно выбрать компанию, подготовить пост и управлять расписанием."
+MINIAPP_UNAVAILABLE = "Мини-приложение пока не подключено. Команды бота доступны в /help."

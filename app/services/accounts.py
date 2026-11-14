@@ -88,7 +88,7 @@ async def resolve_account(
 
     if start_payload and INVITE_CODE_RE.match(start_payload):
         business = await BusinessRepo(session).get_by_invite(start_payload)
-        if business is not None:
+        if business is not None and not (business.settings or {}).get("miniapp_archived"):
             user = await _join_company(session, user, telegram_id, name, business)
             return Account(user, business, joined=True)
 
@@ -96,7 +96,7 @@ async def resolve_account(
     if user is None or not user.is_active or is_admin(user) or user.business_id is None:
         return None
     business = await BusinessRepo(session).get(user.business_id)
-    if business is None:
+    if business is None or (business.settings or {}).get("miniapp_archived"):
         return None
     if name and user.name != name:
         user.name = name
@@ -117,8 +117,11 @@ async def ensure_user_and_business(
     businesses = BusinessRepo(session)
 
     business = await businesses.get(user.business_id) if user.business_id else None
-    if business is None:
-        business = await businesses.get_by_owner(user.id)
+    if business is None or not can_use_company(business, user):
+        business = next(
+            (item for item in await businesses.list_owned(user.id) if can_use_company(item, user)),
+            None,
+        )
         if business is None:
             business = await businesses.create(
                 user.id, DEFAULT_COMPANY_NAME, invite_code=new_invite_code()
@@ -130,6 +133,18 @@ async def ensure_user_and_business(
         user.business_id = business.id
         await session.flush()
     return user, business
+
+
+async def accessible_profiles(session: AsyncSession, user: User) -> list[Business]:
+    repo = BusinessRepo(session)
+    profiles = await repo.list_owned(user.id)
+    if user.business_id is not None and not is_admin(user):
+        joined = await repo.get(user.business_id)
+        if joined is not None:
+            profiles.append(joined)
+    return list(
+        {profile.id: profile for profile in profiles if can_use_company(profile, user)}.values()
+    )
 
 
 async def _join_company(
@@ -147,7 +162,7 @@ async def _join_company(
 
     # Пока клиента не было, посты согласовывал администратор — теперь клиент
     owner = await UserRepo(session).get(business.owner_id)
-    if owner is None or is_admin(owner):
+    if (owner is None or is_admin(owner)) and not (business.settings or {}).get("miniapp_private"):
         business.owner_id = user.id
     await EventLogRepo(session).log(
         EventType.CLIENT_JOINED,
@@ -191,6 +206,8 @@ async def list_companies(session: AsyncSession, admin: User) -> list[CompanyInfo
     channels = ChannelRepo(session)
     result = []
     for business in await BusinessRepo(session).list_all():
+        if not can_use_company(business, admin):
+            continue
         clients = [u for u in await users.list_by_business(business.id) if u.role == UserRole.OWNER]
         result.append(
             CompanyInfo(
@@ -206,7 +223,7 @@ async def list_companies(session: AsyncSession, admin: User) -> list[CompanyInfo
 async def switch_company(session: AsyncSession, admin: User, business_id: int) -> Business:
     _require_admin(admin)
     business = await BusinessRepo(session).get(business_id)
-    if business is None:
+    if business is None or not can_use_company(business, admin):
         raise CompanyError(f"Компании #{business_id} нет. Список — /companies")
     admin.business_id = business.id
     await session.flush()
@@ -262,9 +279,13 @@ def _require_admin(user: User) -> None:
 def normalize_channel_id(raw: str) -> str:
     """'@name', 't.me/name', '-100…' → идентификатор для Bot API."""
     value = raw.strip()
-    for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
-        if value.lower().startswith(prefix):
-            value = "@" + value[len(prefix) :].strip("/")
+    link = re.fullmatch(
+        r"(?:https?://)?(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]+)(?:/\d+)?/?(?:[?#].*)?",
+        value,
+        re.IGNORECASE,
+    )
+    if link:
+        value = "@" + link[1]
     if value and not value.startswith(("@", "-")) and not value.isdigit():
         value = "@" + value
     if not CHANNEL_ID_RE.match(value):
@@ -298,7 +319,12 @@ async def get_accessible_post(
     post = await PostRepo(session).get(post_id)
     if post is None:
         return None
-    if post.business_id == business.id or is_admin(user):
+    target = (
+        business
+        if post.business_id == business.id
+        else await BusinessRepo(session).get(post.business_id)
+    )
+    if target and can_use_company(target, user) and (target.id == business.id or is_admin(user)):
         return post
     return None
 
@@ -310,3 +336,12 @@ async def business_of(session: AsyncSession, post: Post, current: Business) -> B
     business = await BusinessRepo(session).get(post.business_id)
     assert business is not None  # FK гарантирует
     return business
+
+
+def can_use_company(business: Business, user: User) -> bool:
+    settings = business.settings or {}
+    return not settings.get("miniapp_archived") and (
+        not settings.get("miniapp_private")
+        or business.owner_id == user.id
+        or (not is_admin(user) and user.business_id == business.id)
+    )

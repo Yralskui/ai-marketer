@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urldefrag, urljoin, urlparse
 
-import httpx
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
+from aiohttp.abc import AbstractResolver
+from aiohttp.resolver import ThreadedResolver
 from bs4 import BeautifulSoup
+from yarl import URL
 
 log = logging.getLogger(__name__)
 
@@ -64,20 +70,17 @@ async def fetch_site_text(
 
     TODO(поток A): sitemap.xml, приоритизация страниц, кэширование.
     """
-    async with httpx.AsyncClient(
-        follow_redirects=True, timeout=request_timeout, headers={"User-Agent": USER_AGENT}
-    ) as client:
+    async with website_client(request_timeout) as client:
         try:
             main_html, final_url = await _get(client, url)
-        except httpx.HTTPError as exc:
-            raise WebsiteFetchError(f"Не удалось открыть {url}: {exc}") from exc
-
+        except (ClientError, TimeoutError) as exc:
+            raise WebsiteFetchError("Не удалось открыть сайт") from exc
         pages = [await asyncio.to_thread(html_to_page, final_url, main_html)]
         for link in pick_internal_links(final_url, main_html, limit=max_pages - 1):
             try:
                 html, real_url = await _get(client, link)
-            except httpx.HTTPError as exc:
-                log.info("Пропускаю %s: %s", link, exc)
+            except (ClientError, TimeoutError, WebsiteFetchError):
+                log.info("Не удалось прочитать внутреннюю страницу сайта")
                 continue
             pages.append(await asyncio.to_thread(html_to_page, real_url, html))
 
@@ -87,12 +90,97 @@ async def fetch_site_text(
     return pages
 
 
-async def _get(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
-    resp = await client.get(url)
-    resp.raise_for_status()
-    if "html" not in resp.headers.get("content-type", "html"):
-        raise httpx.HTTPError(f"не HTML: {resp.headers.get('content-type')}")
-    return resp.text, str(resp.url)
+@asynccontextmanager
+async def website_client(request_timeout: float):
+    resolver = PublicResolver()
+    try:
+        async with ClientSession(
+            connector=TCPConnector(resolver=resolver, use_dns_cache=False),
+            timeout=ClientTimeout(total=request_timeout),
+            headers={"User-Agent": USER_AGENT},
+            trust_env=False,
+        ) as client:
+            yield client
+    finally:
+        await resolver.close()
+
+
+def public_url(url: str) -> str:
+    try:
+        normalized = str(URL(url))
+        parsed = urlparse(normalized)
+        port = parsed.port
+    except ValueError as exc:
+        raise WebsiteFetchError("Укажите корректный адрес сайта") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 80 if parsed.scheme == "http" else 443}
+        or "%" in parsed.hostname
+    ):
+        raise WebsiteFetchError("Укажите публичный адрес сайта HTTP или HTTPS")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(parsed.hostname))
+        except OSError:
+            return normalized
+    if not is_public_ip(address):
+        raise WebsiteFetchError("Сайт должен быть доступен из интернета")
+    return normalized
+
+
+def is_public_ip(address) -> bool:
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return is_public_ip(address.ipv4_mapped)
+        if address.sixtofour is not None or address.teredo is not None:
+            return False
+    return address.is_global and not address.is_multicast and not address.is_reserved
+
+
+class PublicResolver(AbstractResolver):
+    """Проверяет адреса, которые HTTP-клиент использует при подключении."""
+
+    def __init__(self) -> None:
+        self.inner = ThreadedResolver()
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
+        records = await self.inner.resolve(host, port, family)
+        public = [
+            record for record in records if is_public_ip(ipaddress.ip_address(record["host"]))
+        ]
+        if not public:
+            raise OSError("Сайт должен быть доступен из интернета")
+        return public
+
+    async def close(self) -> None:
+        await self.inner.close()
+
+
+async def _get(client: ClientSession, url: str) -> tuple[str, str]:
+    for _ in range(4):
+        async with client.get(public_url(url), allow_redirects=False) as response:
+            if response.status in {301, 302, 303, 307, 308} and response.headers.get("Location"):
+                url = urljoin(str(response.url), response.headers["Location"])
+                continue
+            response.raise_for_status()
+            if response.content_type not in {"text/html", "application/xhtml+xml"}:
+                raise WebsiteFetchError("Страница не в формате HTML")
+            data = bytearray()
+            async for part in response.content.iter_chunked(65536):
+                data.extend(part)
+                if len(data) > 2_000_000:
+                    raise WebsiteFetchError("HTML-страница превышает 2 МБ")
+            try:
+                html = data.decode(response.charset or "utf-8", errors="replace")
+            except LookupError:
+                html = data.decode("utf-8", errors="replace")
+            return html, str(response.url)
+    raise WebsiteFetchError("Слишком много перенаправлений")
 
 
 def html_to_page(url: str, html: str) -> PageText:

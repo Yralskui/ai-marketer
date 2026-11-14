@@ -10,7 +10,7 @@ from __future__ import annotations
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import keyboards as kb
@@ -18,7 +18,6 @@ from app.bot import texts
 from app.bot.handlers import (
     admin,
     audit,
-    brand,
     chat,
     comments,
     companies,
@@ -32,7 +31,6 @@ from app.bot.states import MenuStates
 from app.container import AppContainer
 from app.db.models import Business, User
 from app.services import accounts
-from app.services.accounts import Account
 
 router = Router(name="menu")
 
@@ -88,12 +86,11 @@ async def menu_status(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
-    db_user: User,
     business: Business,
     container: AppContainer,
 ) -> None:
     await state.clear()
-    await admin.cmd_status(message, session, db_user, business, container)
+    await admin.cmd_status(message, session, business, container)
 
 
 @router.message(F.text == kb.MENU_HELP)
@@ -225,27 +222,3 @@ async def menu_photos(
 ) -> None:
     await state.clear()
     await media.cmd_photos(message, session, business, bot)
-
-
-@router.message(F.text == kb.MENU_BACK)
-async def menu_back(message: Message, state: FSMContext, account: Account) -> None:
-    """Вернуть главное меню (например, после выбора канала)."""
-    await state.clear()
-    await message.answer(texts.BACK_TO_MENU, reply_markup=kb.main_menu(admin=account.is_admin))
-
-
-@router.callback_query(kb.MenuCb.filter(F.action == "new_post"))
-async def on_new_post_button(callback: CallbackQuery, state: FSMContext) -> None:
-    """Кнопка «✍️ Создать пост» из пустых состояний и «Состояния»."""
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await state.set_state(MenuStates.waiting_post_topic)
-        await callback.message.answer(texts.ASK_POST_TOPIC, reply_markup=kb.cancel_keyboard())
-
-
-@router.message(F.text == kb.MENU_BRAND)
-async def menu_brand(
-    message: Message, state: FSMContext, db_user: User, business: Business
-) -> None:
-    await state.clear()
-    await brand.menu_brand(message, db_user, business)

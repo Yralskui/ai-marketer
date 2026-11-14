@@ -16,7 +16,7 @@ class PeriodArgs(BaseModel):
 @tool(
     "get_analytics",
     "Статистика публикаций за период: число постов, реакции, комментарии, лучшие посты, "
-    "расходы на AI. Просмотры недоступны.",
+    "доступные просмотры, пересылки, подписчики и расходы на AI.",
 )
 async def get_analytics(ctx: AgentContext, args: PeriodArgs) -> dict:
     summary = await analytics.get_summary(
@@ -31,6 +31,11 @@ async def get_analytics(ctx: AgentContext, args: PeriodArgs) -> dict:
 )
 async def make_report(ctx: AgentContext, args: PeriodArgs) -> dict:
     report = await reports.build_report(
-        ctx.session, ctx.llm, ctx.business, days=args.days, tz=ctx.settings.tz
+        ctx.session,
+        ctx.llm,
+        ctx.business,
+        days=args.days,
+        tz=ctx.settings.tz,
+        sources=ctx.analytics_sources,
     )
-    return {"text": report.plain_text, "chart": "график — по кнопке «📈 Отчёт» или /report"}
+    return {"text": report.plain_text, "chart": "график — в разделе «Отчёт» Mini App"}

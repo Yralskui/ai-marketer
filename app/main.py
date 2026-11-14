@@ -21,6 +21,7 @@ log = logging.getLogger("app")
 async def run_check(settings: Settings) -> int:
     """Инициализирует всё, кроме подключения к Telegram, и выходит."""
     from aiogram.utils.token import TokenValidationError, validate_token
+    from sqlalchemy.engine import make_url
 
     from app.bot.setup import create_bot, create_dispatcher
     from app.container import build_container
@@ -55,7 +56,8 @@ async def run_check(settings: Settings) -> int:
             await bot.session.close()
 
     print("Проверка конфигурации:")
-    print(f"  БД:            {settings.effective_database_url}")
+    database_url = make_url(settings.effective_database_url)
+    print(f"  БД:            {database_url.get_backend_name()}")
     print(f"  LLM:           {container.llm.name}")
     print(f"  Картинки:      {container.images.name}")
     print(f"  Dry-run:       {settings.publish_dry_run}")
@@ -69,11 +71,12 @@ async def run_check(settings: Settings) -> int:
 
 
 async def run_bot(settings: Settings) -> None:
-    from aiogram.types import BotCommandScopeChat
+    from aiogram.types import BotCommandScopeChat, MenuButtonWebApp, WebAppInfo
 
-    from app.bot.setup import ADMIN_COMMANDS, BOT_COMMANDS, create_bot, create_dispatcher
+    from app.bot.setup import BOT_COMMANDS, create_bot, create_dispatcher
     from app.container import build_container
     from app.scheduler.setup import create_scheduler
+    from app.web.uploads import start_upload_server
 
     bot = create_bot(settings)
     container = build_container(settings, bot)
@@ -84,6 +87,10 @@ async def run_bot(settings: Settings) -> None:
 
     if not settings.allowed_ids:
         log.warning("ALLOWED_USER_IDS пуст: бот ответит каждому его ID, но никого не пустит")
+    if container.storage is not None:
+        await container.storage.prepare()
+    upload_runner = None
+    vk_tasks = []
     try:
         me = await bot.me()
         log.info(
@@ -93,19 +100,37 @@ async def run_bot(settings: Settings) -> None:
             settings.publish_dry_run,
         )
         await bot.set_my_commands(BOT_COMMANDS)
+        if settings.miniapp_configure_menu and (miniapp_url := settings.telegram_miniapp_url):
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Маркетолог",
+                    web_app=WebAppInfo(url=miniapp_url),
+                )
+            )
         await _set_bot_profile(bot)
         for admin_id in settings.allowed_ids:
             try:
-                await bot.set_my_commands(
-                    ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
-                )
+                await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=admin_id))
             except Exception:  # администратор ещё не писал боту — чат недоступен
                 log.info("Не удалось задать меню команд для %s", admin_id)
+        upload_runner = await start_upload_server(container)
         scheduler.start()
+        if container.vk_clients is not None and not container.vk_clients.business_account:
+            from app.services.vk_engagement import start_longpolls
+
+            _, vk_tasks = await start_longpolls(container.db.sessionmaker, container.vk_clients)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        for task in vk_tasks:
+            task.cancel()
+        if vk_tasks:
+            await asyncio.gather(*vk_tasks, return_exceptions=True)
+        if upload_runner is not None:
+            await upload_runner.cleanup()
         if scheduler.running:
             scheduler.shutdown(wait=False)
+        for source in container.analytics_sources.values():
+            await source.close()
         await container.db.dispose()
         await bot.session.close()
 

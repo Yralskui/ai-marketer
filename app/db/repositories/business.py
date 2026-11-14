@@ -21,6 +21,12 @@ class BusinessRepo:
         )
         return result.scalar_one_or_none()
 
+    async def list_owned(self, owner_id: int) -> list[Business]:
+        result = await self.session.scalars(
+            select(Business).where(Business.owner_id == owner_id).order_by(Business.id)
+        )
+        return list(result)
+
     async def get_by_invite(self, code: str) -> Business | None:
         result = await self.session.execute(select(Business).where(Business.invite_code == code))
         return result.scalar_one_or_none()

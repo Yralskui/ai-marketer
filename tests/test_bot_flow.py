@@ -20,32 +20,19 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
     Chat,
-    ChatShared,
     File,
     Message,
     MessageOriginChannel,
-    MessageReactionCountUpdated,
     PhotoSize,
-    ReactionCount,
-    ReactionTypeEmoji,
     Update,
     User,
 )
 
-from app.bot import keyboards as kb
-from app.bot.keyboards import (
-    CommentCb,
-    PostCb,
-    PostsFilterCb,
-    PublishedCb,
-    QuickEditCb,
-    TimeCb,
-)
+from app.bot.keyboards import PostCb
 from app.bot.setup import create_dispatcher
 from app.container import build_container
 from app.db.models import PostStatus
 from app.db.repositories import PostRepo
-from app.scheduler.setup import create_scheduler
 
 OWNER_ID = 111
 STRANGER_ID = 666
@@ -101,17 +88,11 @@ class FakeSession(BaseSession):
     # --- помощники для проверок
 
     def sent_texts(self, chat_id: int | str) -> list[str]:
-        """Тексты сообщений, подписи к фото и правки сообщений в чате — в порядке отправки."""
-        kinds = {
-            "SendMessage": "text",
-            "EditMessageText": "text",
-            "SendPhoto": "caption",
-            "EditMessageCaption": "caption",
-        }
+        """Тексты сообщений и подписи к фото, отправленные в чат."""
         return [
-            getattr(r, kinds[type(r).__name__]) or ""
+            r.text if type(r).__name__ == "SendMessage" else (r.caption or "")
             for r in self.requests
-            if type(r).__name__ in kinds and str(r.chat_id) == str(chat_id)
+            if type(r).__name__ in ("SendMessage", "SendPhoto") and str(r.chat_id) == str(chat_id)
         ]
 
     def clear(self) -> None:
@@ -206,23 +187,6 @@ def photo_msg(uid: int, file_id: str, caption: str | None = None) -> Update:
     )
 
 
-def last_markup(session: FakeSession):
-    """Последняя отправленная или изменённая inline-клавиатура."""
-    for r in reversed(session.requests):
-        markup = getattr(r, "reply_markup", None)
-        if markup is not None and hasattr(markup, "inline_keyboard"):
-            return markup
-    raise AssertionError("клавиатуры нет")
-
-
-def button_data(markup, predicate) -> str:
-    for row in markup.inline_keyboard:
-        for b in row:
-            if b.callback_data and predicate(b):
-                return b.callback_data
-    raise AssertionError("кнопка не найдена")
-
-
 def last_draft_id(session: FakeSession) -> int:
     for text in reversed(session.sent_texts(OWNER_ID)):
         m = re.search(r"Черновик #(\d+)", text or "")
@@ -231,359 +195,75 @@ def last_draft_id(session: FakeSession) -> int:
     raise AssertionError("черновик не отправлен")
 
 
-async def test_end_to_end_bot_flow(settings, monkeypatch, tmp_path):
-    import app.services.media
+async def test_end_to_end_bot_flow(settings):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
 
-    monkeypatch.setattr(app.services.media, "UPLOADS_DIR", tmp_path / "uploads")
+    from app.bot.setup import BOT_COMMANDS
+    from app.db.knowledge import MiniUserState
+    from app.db.repositories import BusinessRepo, UserRepo
+    from app.web.miniapp import MiniApp
+    from tests.test_miniapp import BOT_TOKEN, signed_user
+
     fake = FakeSession()
-    settings.bot_token = "123456:" + "A" * 35
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_public_url = "https://miniapp.example.com"
     bot = Bot(settings.bot_token, session=fake)
     container = build_container(settings, bot)
     await container.db.create_all()
     dp = create_dispatcher(container)
-    container.scheduler = create_scheduler(container)
-    feed = dp.feed_update
 
-    async def status_of(post_id: int) -> PostStatus:
-        async with container.db.sessionmaker() as s:
-            return (await PostRepo(s).get(post_id)).status
-
-    # Чужой пользователь получает отказ и свой ID
-    await feed(bot, msg(STRANGER_ID, "/start"))
+    assert [item.command for item in BOT_COMMANDS] == ["start"]
+    await dp.feed_update(bot, msg(STRANGER_ID, "/start"))
     assert str(STRANGER_ID) in fake.sent_texts(STRANGER_ID)[-1]
+    await dp.feed_update(bot, msg(OWNER_ID, "/start"))
+    assert fake.requests[-1].reply_markup.inline_keyboard[0][0].web_app.url.endswith("/miniapp")
+    async with container.db.sessionmaker() as session:
+        user = await UserRepo(session).get_by_telegram_id(OWNER_ID)
+        company = await BusinessRepo(session).create(user.id, "Студия стекла")
+        await BusinessRepo(session).create(user.id, "Кофейня")
+        session.add(MiniUserState(user_id=user.id, default_created=True))
+        await session.commit()
+        business_id = company.id
 
-    # /start: приветственная картинка + меню кнопками
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, "/start"))
-    assert "Привет, Урал" in fake.sent_texts(OWNER_ID)[-1]
-    welcome = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
-    menu = [b.text for row in welcome.reply_markup.keyboard for b in row]
-    assert kb.MENU_NEW_POST in menu and kb.MENU_COMPANIES in menu  # у админа — и компании
-
-    # Кнопка меню прерывает онбординг и показывает посты
-    await feed(bot, msg(OWNER_ID, kb.MENU_MATERIALS))
-    assert "Расскажите о вашем бизнесе" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(OWNER_ID, kb.MENU_POSTS))
-    assert "Постов пока нет" in fake.sent_texts(OWNER_ID)[-1]
-
-    # Онбординг текстом
-    await feed(bot, msg(OWNER_ID, "/onboarding"))
-    await feed(
-        bot,
-        msg(OWNER_ID, "Мы кофейня «Зерно». Предлагаем: эспрессо, капучино. Клиенты — студенты."),
-    )
-    await feed(bot, msg(OWNER_ID, "/done"))
-    assert "Зерно" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(OWNER_ID, "/profile"))
-    assert "капучино" in fake.sent_texts(OWNER_ID)[-1]
-
-    # Свободный текст -> агент -> черновик с кнопками
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, "Напиши пост про наше новое осеннее меню"))
-    post1 = last_draft_id(fake)
-    draft_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
-    buttons = [b.text for row in draft_msg.reply_markup.inline_keyboard for b in row]
-    assert buttons == [
-        "✅ Опубликовать сейчас",
-        "🕒 Запланировать",
-        "✏️ Изменить",
-        "🖼 Своё фото",
-        "❌ Отклонить",
-    ]
-    assert await status_of(post1) == PostStatus.PENDING_APPROVAL
-
-    # ✅ Опубликовать -> сообщение в канал + ссылка
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "publish", post1))
-    channel_posts = fake.sent_texts("@test_channel")
-    assert len(channel_posts) == 1 and "осеннее меню" in channel_posts[0]
-    assert "опубликован" in fake.sent_texts(OWNER_ID)[-1]
-    assert "https://t.me/test_channel/" in fake.sent_texts(OWNER_ID)[-1]
-    assert await status_of(post1) == PostStatus.PUBLISHED
-    edited = [r for r in fake.requests if type(r).__name__ == "EditMessageText"]
-    assert edited and "опубликован" in edited[-1].text  # карточка обновилась на месте
-    published_buttons = [b.text for row in edited[-1].reply_markup.inline_keyboard for b in row]
-    assert published_buttons == ["🔗 Открыть в канале", "🗑 Удалить из канала"]
-
-    # Повторное нажатие не публикует второй раз
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "publish", post1))
+    await dp.feed_update(bot, msg(OWNER_ID, "Напиши пост про витрины"))
+    assert "Для какой компании" in fake.sent_texts(OWNER_ID)[-1]
+    await dp.feed_update(bot, msg(OWNER_ID, "Студия стекла"))
+    # перед черновиком бот уточняет стиль и картинку кнопками
+    for expected, choice in (("В каком стиле", "neutral"), ("Добавить картинку", "none")):
+        assert expected in fake.sent_texts(OWNER_ID)[-1]
+        data = fake.requests[-1].reply_markup.inline_keyboard[0][0].callback_data
+        prefix = data.rsplit(":", 1)[0]
+        await dp.feed_update(bot, press_data(OWNER_ID, f"{prefix}:{choice}"))
+    assert "ждёт согласования" in fake.sent_texts(OWNER_ID)[-1]
+    async with container.db.sessionmaker() as session:
+        (post,) = await PostRepo(session).list_for_business(business_id)
+        assert post.status == PostStatus.PENDING_APPROVAL
+    assert all(type(request).__name__ != "SendPhoto" for request in fake.requests)
+    assert "Новые предложения" in fake.sent_texts(OWNER_ID)[-1]
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(OWNER_ID, token=settings.bot_token)}
+    async with TestClient(TestServer(app)) as client:
+        await client.post("/miniapp/api/select", headers=headers, json={"id": business_id})
+        response = await client.get("/miniapp/api/chat", headers=headers)
+        assert response.status == 200
+        timeline = (await response.json())["history"]
+        assert [item["text"] for item in timeline if item["me"]] == ["Напиши пост про витрины"]
+        assert [item["draft_id"] for item in timeline if "draft_id" in item] == [post.id]
+        count = len(fake.requests)
+        response = await client.post(
+            "/miniapp/api/chat",
+            headers=headers,
+            json={
+                "company": business_id,
+                "text": "Как утвердить план?",
+            },
+        )
+        assert response.status == 200
+        assert len(fake.requests) == count
+    await dp.feed_update(bot, press(OWNER_ID, "publish", post.id))
     assert fake.sent_texts("@test_channel") == []
-
-    # 💬 Комментарий подписчика под постом -> карточка владельцу -> «Отправить» -> ответ
-    async with container.db.sessionmaker() as s:
-        channel_message_id = int((await PostRepo(s).get(post1)).external_id)
-    fake.clear()
-    await feed(
-        bot,
-        group_comment(
-            COMMENTER_ID, "Выглядит вкусно! А тыквенный латте будет?", channel_message_id
-        ),
-    )
-    card = fake.sent_texts(OWNER_ID)[-1]
-    assert "Новый комментарий" in card and f"к посту #{post1}" in card and "Анна" in card
-    assert fake.sent_texts(GROUP_ID) == []  # без разрешения в группу ничего не ушло
-    card_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
-    send_data = card_msg.reply_markup.inline_keyboard[0][0].callback_data
-    assert CommentCb.unpack(send_data).action == "send"
-    await feed(bot, press_data(OWNER_ID, send_data))
-    replies = [
-        r
-        for r in fake.requests
-        if type(r).__name__ == "SendMessage" and str(r.chat_id) == str(GROUP_ID)
-    ]
-    assert len(replies) == 1 and "Анна" in replies[0].text
-    await feed(bot, press_data(OWNER_ID, send_data))  # повторное нажатие — без второго ответа
-    replies = [
-        r
-        for r in fake.requests
-        if type(r).__name__ == "SendMessage" and str(r.chat_id) == str(GROUP_ID)
-    ]
-    assert len(replies) == 1
-    await feed(bot, msg(OWNER_ID, "/comments"))
-    overview = fake.sent_texts(OWNER_ID)[-1]
-    assert "подключена ✅" in overview and "✅ <b>Анна" in overview
-
-    # ❤️ Telegram прислал счётчик реакций на пост -> 📈 отчёт с цифрами и графиком
-    reaction = Update(
-        update_id=next(_update_ids),
-        message_reaction_count=MessageReactionCountUpdated(
-            chat=CHANNEL_CHAT,
-            message_id=channel_message_id,
-            date=datetime.now(),
-            reactions=[ReactionCount(type=ReactionTypeEmoji(emoji="👍"), total_count=7)],
-        ),
-    )
-    await feed(bot, reaction)
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, kb.MENU_REPORT))
-    photo = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
-    report_text = " ".join(fake.sent_texts(OWNER_ID))
-    assert photo.chat_id == OWNER_ID
-    assert "Отчёт за 7 дн." in report_text and "Реакции: <b>7</b>" in report_text
-    assert "Комментарии: <b>1</b>, отвечено 1" in report_text
-
-    # 🕒 Запланировать
-    await feed(bot, msg(OWNER_ID, "Подготовь пост про скидки на выходных"))
-    post2 = last_draft_id(fake)
-    await feed(bot, press(OWNER_ID, "schedule", post2))
-    await feed(bot, msg(OWNER_ID, "абракадабра"))
-    assert "Не понял время" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(OWNER_ID, "завтра в 10 утра"))
-    assert "запланирован" in fake.sent_texts(OWNER_ID)[-1]
-    assert await status_of(post2) == PostStatus.SCHEDULED
-
-    # 🕒 Быстрое время кнопкой
-    await feed(bot, msg(OWNER_ID, "Напиши пост про утренний кофе"))
-    post_t = last_draft_id(fake)
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "schedule", post_t))
-    time_data = button_data(last_markup(fake), lambda b: b.callback_data.startswith("tm:"))
-    assert TimeCb.unpack(time_data).post_id == post_t
-    await feed(bot, press_data(OWNER_ID, time_data))
-    assert await status_of(post_t) == PostStatus.SCHEDULED
-    assert "запланирован" in fake.sent_texts(OWNER_ID)[-1]
-
-    # ✏️ Изменить -> новая версия черновика (пост создаём через кнопку меню)
-    await feed(bot, msg(OWNER_ID, kb.MENU_NEW_POST))
-    assert "О чём пост" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(OWNER_ID, "новый десерт"))
-    post3 = last_draft_id(fake)
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "edit", post3))
-    await feed(bot, msg(OWNER_ID, "добавь эмодзи"))
-    assert last_draft_id(fake) == post3
-    assert await status_of(post3) == PostStatus.PENDING_APPROVAL
-
-    # ✂️ Быстрая правка кнопкой
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "edit", post3))
-    short = button_data(last_markup(fake), lambda b: b.callback_data.startswith("qe:"))
-    assert QuickEditCb.unpack(short).code == "short"
-    await feed(bot, press_data(OWNER_ID, short))
-    assert last_draft_id(fake) == post3
-    assert await status_of(post3) == PostStatus.PENDING_APPROVAL
-
-    # 🖼 Своё фото вместо картинки: черновик снова уходит на согласование
-    fake.clear()
-    await feed(bot, press(OWNER_ID, "photo", post3))
-    assert "Пришлите фото для поста" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, photo_msg(OWNER_ID, "own-1"))
-    assert f"Фото в посте #{post3} заменено" in " ".join(fake.sent_texts(OWNER_ID))
-    assert last_draft_id(fake) == post3
-    async with container.db.sessionmaker() as s:
-        assert (await PostRepo(s).get(post3)).image_path.endswith("u-own-1.jpg")
-    assert await status_of(post3) == PostStatus.PENDING_APPROVAL
-
-    # ❌ Отклонить
-    await feed(bot, press(OWNER_ID, "reject", post3))
-    assert await status_of(post3) == PostStatus.REJECTED
-
-    # Фото с подписью -> сразу пост с этим фото; без подписи -> кнопки
-    fake.clear()
-    await feed(bot, photo_msg(OWNER_ID, "own-2", "Новый зал на втором этаже"))
-    post4 = last_draft_id(fake)
-    async with container.db.sessionmaker() as s:
-        assert (await PostRepo(s).get(post4)).image_path.endswith("u-own-2.jpg")
-    await feed(bot, photo_msg(OWNER_ID, "own-3"))
-    assert "Сделать с ним пост" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(OWNER_ID, kb.MENU_PHOTOS))
-    assert "Фотобанк" in fake.sent_texts(OWNER_ID)[-1]
-    assert any(type(r).__name__ == "SendMediaGroup" for r in fake.requests)
-
-    # /posts, /status, неизвестная команда
-    await feed(bot, msg(OWNER_ID, "/posts"))
-    posts_text = fake.sent_texts(OWNER_ID)[-1]
-    assert f"#{post1}" in posts_text and f"#{post2}" in posts_text
-    await feed(bot, msg(OWNER_ID, "/status"))
-    status_text = fake.sent_texts(OWNER_ID)[-1]
-    assert "Диагностика" in status_text and "mock" in status_text
-    await feed(bot, msg(OWNER_ID, "/unknown"))
-    assert "Не знаю такой команды" in fake.sent_texts(OWNER_ID)[-1]
-
-    # ---------------- вторая компания без кода (критерии 9 и 11)
-    await feed(bot, msg(OWNER_ID, "/new_company Цветы «Роза»"))
-    created = fake.sent_texts(OWNER_ID)[-1]
-    assert "Роза" in created and "создана" in created
-    invite = re.search(r"https://t\.me/test_bot\?start=([A-Za-z0-9_-]+)", created)
-    assert invite, created
-    company_b = int(re.search(r"\(#(\d+)\)", created).group(1))
-
-    # Клиент подключается по ссылке и видит только свою компанию
-    fake.clear()
-    await feed(bot, msg(CLIENT_ID, f"/start {invite.group(1)}"))
-    assert "подключены к компании <b>Цветы «Роза»</b>" in fake.sent_texts(CLIENT_ID)[-1]
-    welcome = next(r for r in fake.requests if type(r).__name__ == "SendPhoto")
-    client_menu = [b.text for row in welcome.reply_markup.keyboard for b in row]
-    assert kb.MENU_NEW_POST in client_menu and kb.MENU_COMPANIES not in client_menu
-    await feed(bot, msg(CLIENT_ID, "/posts"))
-    assert "Постов пока нет" in fake.sent_texts(CLIENT_ID)[-1]
-    await feed(bot, msg(CLIENT_ID, f"/post {post1}"))
-    assert "не найден" in fake.sent_texts(CLIENT_ID)[-1]
-
-    # Кнопка под чужим постом не работает
-    fake.clear()
-    await feed(bot, press(CLIENT_ID, "reject", post2))
-    answers = [r for r in fake.requests if type(r).__name__ == "AnswerCallbackQuery"]
-    assert answers and "не найден" in (answers[-1].text or "")
-    assert await status_of(post2) == PostStatus.SCHEDULED
-
-    # Управление компаниями — только администратору
-    await feed(bot, msg(CLIENT_ID, "/companies"))
-    assert "только администратору" in fake.sent_texts(CLIENT_ID)[-1]
-
-    # Клиент подключает свой канал
-    await feed(bot, msg(CLIENT_ID, "/channel t.me/roza_flowers"))
-    assert "<code>@roza_flowers</code> подключён" in fake.sent_texts(CLIENT_ID)[-1]
-
-    # Администратор видит обе компании и переключается между ними
-    await feed(bot, msg(OWNER_ID, "/companies"))
-    listing = fake.sent_texts(OWNER_ID)[-1]
-    assert "Роза" in listing and "@roza_flowers" in listing and "@test_channel" in listing
-    await feed(bot, msg(OWNER_ID, "/posts"))
-    assert "Постов пока нет" in fake.sent_texts(OWNER_ID)[-1]  # сейчас выбрана компания B
-    async with container.db.sessionmaker() as s:
-        company_a = (await PostRepo(s).get(post1)).business_id
-    assert company_a != company_b
-    await feed(bot, msg(OWNER_ID, f"/use {company_a}"))
-    await feed(bot, msg(OWNER_ID, "/posts"))
-    assert f"#{post1}" in fake.sent_texts(OWNER_ID)[-1]
-
-    # Расходы на AI: админ видит все компании и ставит лимит, клиент — нет
-    await feed(bot, msg(OWNER_ID, "/costs"))
-    costs_text = fake.sent_texts(OWNER_ID)[-1]
-    assert "Расходы на AI" in costs_text and "Роза" in costs_text
-    await feed(bot, msg(OWNER_ID, "/budget 500"))
-    assert "500 ₽ в месяц" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(CLIENT_ID, "/budget 1"))
-    assert "только администратору" in fake.sent_texts(CLIENT_ID)[-1]
-    await feed(bot, msg(CLIENT_ID, "/costs"))
-    assert "Роза" in fake.sent_texts(CLIENT_ID)[-1]
-    assert "Зерно" not in fake.sent_texts(CLIENT_ID)[-1]
-
-    # Журнал действий и отзыв доступа клиента
-    await feed(bot, msg(OWNER_ID, f"/use {company_b}"))
-    await feed(bot, msg(OWNER_ID, "/log"))
-    assert "Журнал действий" in fake.sent_texts(OWNER_ID)[-1]
-    assert "client_joined" in fake.sent_texts(OWNER_ID)[-1]
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, "/clients"))
-    clients_msg = next(r for r in fake.requests if getattr(r, "reply_markup", None) is not None)
-    revoke = clients_msg.reply_markup.inline_keyboard[0][0].callback_data
-    await feed(bot, press_data(OWNER_ID, revoke))
-    assert "отключён" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, msg(CLIENT_ID, "/posts"))
-    assert "нет доступа" in fake.sent_texts(CLIENT_ID)[-1]
-
-    # 📋 Посты кнопками и фильтрами
-    await feed(bot, msg(OWNER_ID, f"/use {company_a}"))
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, kb.MENU_POSTS))
-    flt = button_data(
-        last_markup(fake), lambda b: b.callback_data == PostsFilterCb(status="published").pack()
-    )
-    await feed(bot, press_data(OWNER_ID, flt))
-    assert f"#{post1}" in fake.sent_texts(OWNER_ID)[-1]
-    assert f"#{post3}" not in fake.sent_texts(OWNER_ID)[-1]  # отклонённый не «вышел»
-
-    # 🗑 Удалить опубликованный пост из канала — с подтверждением
-    fake.clear()
-    await feed(bot, press_data(OWNER_ID, PublishedCb(action="delete", post_id=post1).pack()))
-    assert "Удалить пост" in fake.sent_texts(OWNER_ID)[-1]
-    await feed(bot, press_data(OWNER_ID, PublishedCb(action="delete_yes", post_id=post1).pack()))
-    deleted = [r for r in fake.requests if type(r).__name__ == "DeleteMessage"]
-    assert deleted and str(deleted[-1].chat_id) == "@test_channel"
-    async with container.db.sessionmaker() as s:
-        assert (await PostRepo(s).get(post1)).external_url is None
-
-    # 📣 Канал выбран нативной кнопкой Telegram
-    await feed(bot, msg(OWNER_ID, kb.MENU_CHANNEL))
-    picker = next(
-        r for r in reversed(fake.requests) if hasattr(getattr(r, "reply_markup", None), "keyboard")
-    )
-    assert picker.reply_markup.keyboard[0][0].request_chat is not None
-    shared = Update(
-        update_id=next(_update_ids),
-        message=Message(
-            message_id=next(_update_ids),
-            date=datetime.now(),
-            chat=Chat(id=OWNER_ID, type="private"),
-            from_user=_user(OWNER_ID),
-            chat_shared=ChatShared(request_id=1, chat_id=-1009876543210, title="Кофейня News"),
-        ),
-    )
-    await feed(bot, shared)
-    assert "Кофейня News" in fake.sent_texts(OWNER_ID)[-1]
-    async with container.db.sessionmaker() as s:
-        from app.db.models import Platform
-        from app.db.repositories import ChannelRepo
-
-        channel = await ChannelRepo(s).get_active(company_a, Platform.TELEGRAM)
-        assert channel.external_id == "-1009876543210"
-
-    # 📊 Администратор видит полную диагностику (клиентская версия — в tests/test_ux.py)
-    await feed(bot, msg(OWNER_ID, kb.MENU_STATUS))
-    assert "Диагностика" in fake.sent_texts(OWNER_ID)[-1]
-
-    # 🎨 Бренд-гид: шаблон Салаватстекла -> проверка поста -> «Исправить по бренд-гиду»
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, kb.MENU_BRAND))
-    assert "Бренд-гид" in fake.sent_texts(OWNER_ID)[-1]
-    preset = button_data(last_markup(fake), lambda b: b.callback_data.startswith("brand:preset"))
-    await feed(bot, press_data(OWNER_ID, preset))
-    assert "MultiComfort° Light Blue 55/38" in fake.sent_texts(OWNER_ID)[-1]
-    fake.clear()
-    await feed(bot, msg(OWNER_ID, "Напиши пост про стекло multicomfort"))
-    card = next(t for t in reversed(fake.sent_texts(OWNER_ID)) if "Куда:" in t)
-    assert "Проверка бренд-гида" in card and "MultiComfort°" in card
-    fix = button_data(last_markup(fake), lambda b: b.callback_data.startswith("post:brandfix"))
-    brand_post = last_draft_id(fake)
-    await feed(bot, press_data(OWNER_ID, fix))
-    assert last_draft_id(fake) == brand_post
-    assert await status_of(brand_post) == PostStatus.PENDING_APPROVAL
-
-    # Без приглашения посторонний по-прежнему не проходит
-    await feed(bot, msg(STRANGER_ID, "/start wrong-invite-code"))
-    assert "нет доступа" in fake.sent_texts(STRANGER_ID)[-1]
-
+    await dp.feed_update(bot, msg(OWNER_ID, "/posts"))
+    assert "Mini App" in fake.sent_texts(OWNER_ID)[-1]
     await container.db.dispose()

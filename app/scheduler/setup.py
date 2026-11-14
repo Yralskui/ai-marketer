@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
 JOB_TITLES = {
     "publish_due_posts": "Публикация запланированных постов",
-    "generate_daily_drafts": "Автономные черновики по плану",
+    "prepare_plan_drafts": "Черновики по утверждённым планам",
+    "generate_daily_drafts": "Автономные предложения тем",
+    "collect_social_metrics": "Почасовые метрики соцсетей",
     "weekly_report": "Еженедельный отчёт",
 }
 
@@ -30,15 +32,37 @@ def create_scheduler(container: AppContainer) -> AsyncIOScheduler:
         seconds=settings.publish_check_interval_seconds,
         id="publish_due_posts",
         next_run_time=datetime.now(settings.tz),
+        misfire_grace_time=60,
         **common,
     )
+    scheduler.add_job(
+        jobs.prepare_plan_drafts,
+        "interval",
+        minutes=5,
+        id="prepare_plan_drafts",
+        next_run_time=datetime.now(settings.tz),
+        **common,
+    )
+    if container.analytics_sources:
+        scheduler.add_job(
+            jobs.collect_social_metrics,
+            "cron",
+            minute=0,
+            id="collect_social_metrics",
+            next_run_time=datetime.now(settings.tz),
+            misfire_grace_time=300,
+            **common,
+        )
     if settings.enable_auto_drafts:
+        auto_trigger = (
+            {"trigger": "interval", "minutes": settings.auto_drafts_interval_minutes}
+            if settings.auto_drafts_interval_minutes > 0
+            else {"trigger": "cron", "hour": 9, "minute": 0}
+        )
         scheduler.add_job(
             jobs.generate_daily_drafts_job,
-            "cron",
-            hour=9,
-            minute=0,
             id="generate_daily_drafts",
+            **auto_trigger,
             **common,
         )
     if settings.enable_weekly_report:

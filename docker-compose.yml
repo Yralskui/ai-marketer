@@ -13,6 +13,8 @@ services:
     environment:
       # БД и картинки — в volume, чтобы переживали пересборку и перезапуск
       DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - bot-data:/app/data
     restart: unless-stopped

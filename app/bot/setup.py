@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
@@ -13,34 +13,7 @@ from app.bot.middlewares import DbSessionMiddleware
 from app.config import Settings
 from app.container import AppContainer
 
-BOT_COMMANDS = [
-    BotCommand(command="start", description="Начать"),
-    BotCommand(command="onboarding", description="Рассказать о бизнесе"),
-    BotCommand(command="profile", description="Профиль бизнеса"),
-    BotCommand(command="posts", description="Посты и статусы"),
-    BotCommand(command="channel", description="Канал для публикаций"),
-    BotCommand(command="comments", description="Комментарии и ответы"),
-    BotCommand(command="report", description="Отчёт за неделю"),
-    BotCommand(command="photos", description="Фотобанк для постов"),
-    BotCommand(command="status", description="Диагностика"),
-    BotCommand(command="help", description="Помощь"),
-    BotCommand(command="cancel", description="Отменить действие"),
-]
-
-# Администраторам дополнительно показываем команды управления компаниями
-ADMIN_COMMANDS = [
-    *BOT_COMMANDS[:1],
-    BotCommand(command="companies", description="Компании (админ)"),
-    BotCommand(command="new_company", description="Добавить компанию (админ)"),
-    BotCommand(command="invite", description="Ссылка-приглашение клиента (админ)"),
-    BotCommand(command="costs", description="Расходы на AI (админ)"),
-    BotCommand(command="budget", description="Лимит расходов компании (админ)"),
-    BotCommand(command="autoreply", description="Автоответ на комментарии (админ)"),
-    BotCommand(command="clients", description="Клиенты и доступ (админ)"),
-    BotCommand(command="log", description="Журнал действий"),
-    BotCommand(command="brand", description="Бренд-гид компании (админ)"),
-    *BOT_COMMANDS[1:],
-]
+BOT_COMMANDS = [BotCommand(command="start", description="Начать заново")]
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -53,40 +26,12 @@ def create_bot(settings: Settings) -> Bot:
 
 
 def create_dispatcher(container: AppContainer) -> Dispatcher:
-    # Импорт внутри функции: роутеры — модульные синглтоны, подключаются один раз
-    from app.bot.handlers import (
-        admin,
-        approval,
-        audit,
-        brand,
-        chat,
-        comments,
-        companies,
-        costs,
-        media,
-        menu,
-        onboarding,
-        reports,
-        start,
-    )
+    from app.bot.handlers import chat, comments, reports, start
 
-    # TODO(поток B): RedisStorage для FSM, чтобы состояния переживали перезапуск
     dp = Dispatcher(storage=MemoryStorage())
     dp["container"] = container
     dp.update.outer_middleware(DbSessionMiddleware(container))
-    dp.include_routers(
-        comments.router,  # ПЕРВЫМ: забирает все сообщения из групп обсуждения
-        start.router,
-        menu.router,  # кнопки меню — раньше онбординга: прерывают любой ввод
-        media.router,  # фото — в фотобанк из любого состояния
-        onboarding.router,
-        approval.router,
-        admin.router,
-        companies.router,
-        costs.router,
-        audit.router,
-        brand.router,
-        reports.router,
-        chat.router,  # ПОСЛЕДНИМ: ловит весь оставшийся текст
-    )
+    dp.message.register(comments.on_group_message, F.chat.type.in_(comments.GROUP_TYPES))
+    dp.message_reaction_count.register(reports.on_reaction_count)
+    dp.include_routers(start.router, chat.router)
     return dp

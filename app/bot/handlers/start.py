@@ -1,64 +1,43 @@
-"""/start, /help, /cancel."""
+"""Вход в Mini App и сброс незавершённого диалога."""
 
-from __future__ import annotations
-
-from pathlib import Path
-
-from aiogram import Router
-from aiogram.filters import Command, CommandStart
+from aiogram import F, Router
+from aiogram.enums import ChatType
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import texts
-from app.bot.keyboards import CancelCb, main_menu
-from app.db.models import Business, User
-from app.services.accounts import Account
-from app.services.business_profile import get_profile
+from app.bot.keyboards import miniapp_keyboard
+from app.container import AppContainer
+from app.db.knowledge import PendingDraftOptions
+from app.db.models import User
 
 router = Router(name="start")
-
-# Приветственная картинка (рисует scripts/make_brand_assets.py)
-WELCOME_IMAGE = Path(__file__).resolve().parent.parent / "assets" / "welcome.png"
+router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, state: FSMContext, db_user: User, business: Business, account: Account
+    message: Message,
+    state: FSMContext,
+    container: AppContainer,
+    session: AsyncSession,
+    db_user: User,
 ) -> None:
     await state.clear()
-    text = texts.start_for(
-        db_user.name,
-        get_profile(business).is_filled(),
-        business.name,
-        business.id,
-        joined=account.joined,
-        admin=account.is_admin,
+    await session.execute(
+        delete(PendingDraftOptions).where(PendingDraftOptions.user_id == db_user.id)
     )
-    menu = main_menu(admin=account.is_admin)
-    if WELCOME_IMAGE.exists():
-        await message.answer_photo(FSInputFile(WELCOME_IMAGE), caption=text, reply_markup=menu)
-    else:
-        await message.answer(text, reply_markup=menu)
+    await state.update_data(turns_since_reset=0)
+    await message.answer(
+        "Напишите задачу обычным текстом. Профили, черновики и публикации доступны в приложении.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    if url := container.settings.telegram_miniapp_url:
+        await message.answer("Откройте рабочее пространство.", reply_markup=miniapp_keyboard(url))
 
 
-@router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
-    await message.answer(texts.HELP)
-
-
-@router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
-    if await state.get_state() is None:
-        await message.answer(texts.NOTHING_TO_CANCEL)
-        return
-    await state.clear()
-    await message.answer(texts.CANCELLED)
-
-
-@router.callback_query(CancelCb.filter())
-async def on_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    if isinstance(callback.message, Message):
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(texts.CANCELLED)
-    await callback.answer()
+@router.callback_query(~F.data.startswith("draftopt:"))
+async def old_button(callback: CallbackQuery) -> None:
+    await callback.answer("Откройте Mini App через /start.", show_alert=True)

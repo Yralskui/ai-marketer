@@ -5,22 +5,21 @@
 клиенту на согласование в Telegram. После одобрения пост выходит в Telegram-канал, сразу или
 по расписанию.
 
-**Стек:** Python 3.11+, aiogram 3, SQLAlchemy 2 (async) + SQLite, APScheduler, OpenAI-совместимый
-LLM-клиент, pydantic-settings, ruff, pytest.
+**Стек:** Python 3.11+, aiogram 3, aiohttp, SQLAlchemy 2 (async), PostgreSQL с pgvector,
+S3, APScheduler и OpenAI Responses API. Для локальных тестов поддерживается SQLite.
 
-Документация: [архитектура](docs/ARCHITECTURE.md) · [бэклог](docs/TASKS.md) ·
+Документация: [Telegram Mini App](docs/MINIAPP.md) · [архитектура](docs/ARCHITECTURE.md) · [бэклог](docs/TASKS.md) ·
 [подключение компании](docs/ONBOARDING_COMPANY.md) ·
 [выбор нейросети](docs/AI_OPTIONS.md) · [функции и ограничения](docs/FEATURES.md) ·
 [доработки](docs/ROADMAP.md) · [затраты](docs/COSTS.md) ·
-[сценарий демо](docs/DEMO.md) · [чек-лист функций](docs/FEATURE_CHECKLIST.md) ·
-[данные Салаватстекла](content/salavatsteklo/README.md) ·
 [решения](docs/DECISIONS.md) · [правила для Claude Code](CLAUDE.md)
 
 ---
 
 ## Быстрый старт
 
-Нужен Python 3.11 или новее (`python --version`; на Windows — `py -0`).
+Для запуска всех сервисов используйте [Docker Compose](docs/MINIAPP.md#запуск).
+Для локальной разработки нужен Python 3.11 или новее.
 
 ### Windows (PowerShell)
 
@@ -72,7 +71,7 @@ Telegram и подсказывает, чего не хватает в `.env`.
      канала боту [@userinfobot](https://t.me/userinfobot) или
      [@getmyid_bot](https://t.me/getmyid_bot). Ещё вариант: открыть канал в web.telegram.org —
      в адресе будет `#-100…`.
-5. Перезапустите бота и выполните `/status`: в строке канала должно быть «✅ бот — администратор».
+5. Откройте Mini App через `/start`, выберите компанию и проверьте права бота в диагностике канала.
 6. **Оформление.** Текст описания и аватарку (`app/bot/assets/avatar.png`) бот ставит сам при
    запуске; аватарку — только если её ещё нет. Картинку над описанием в пустом чате Bot API
    ставить не умеет: [@BotFather](https://t.me/BotFather) → `/mybots` → бот → Edit Bot →
@@ -84,43 +83,22 @@ Telegram и подсказывает, чего не хватает в `.env`.
 
 | Режим | Что поставить в `.env` | Что происходит |
 |---|---|---|
-| **Разработка без денег и интернета для LLM** | `LLM_PROVIDER=mock`, `IMAGE_PROVIDER=mock`, `PUBLISH_DRY_RUN=true` | Агент и тексты — детерминированные заглушки, картинки рисует Pillow, публикация только пишется в лог |
+| **Разработка без денег и интернета для LLM** | `LLM_PROVIDER=mock`, `IMAGE_PROVIDER=mock`, `PUBLISH_DRY_RUN=true` | Агент и тексты — детерминированные заглушки, картинки рисует Pillow, публикация симулируется, канал не получает сообщения |
 | **Проверка канала** | то же, но `PUBLISH_DRY_RUN=false` | Заглушечные посты реально уходят в канал |
-| **Реальный** | `LLM_PROVIDER=openai`, `LLM_API_KEY=…`, `LLM_MODEL=gpt-4o-mini` (при необходимости `LLM_BASE_URL` совместимого сервиса), `PUBLISH_DRY_RUN=false` | Тексты пишет настоящая модель |
+| **OpenAI** | `LLM_PROVIDER=openai`, `LLM_API_KEY=…`, `LLM_MODEL_LIGHT=gpt-6-luna`, `LLM_MODEL_HEAVY=gpt-6-luna`, `IMAGE_PROVIDER=openai`, `IMAGE_MODEL=gpt-image-2.5-flare` | OpenAI пишет тексты и генерирует иллюстрации по одному ключу. Флаг `PUBLISH_DRY_RUN` управляет отправкой постов в канал |
 
 Остальные переменные описаны в [.env.example](.env.example).
 
-## Что умеет бот
+## Telegram-бот и Mini App
 
-- `/start`, `/help` — приветствие и подсказки.
-- `/onboarding` — рассказать о бизнесе текстом, файлом (PDF, DOCX, TXT) или ссылкой на сайт.
-  `/done` или кнопка «Готово» собирает профиль. `/profile` — посмотреть профиль.
-- Свободный текст передаётся агенту: «напиши пост про осеннее меню с картинкой», «покажи мои
-  посты», «сделай пост #3 короче».
-- Под черновиком четыре кнопки: ✅ Опубликовать сейчас · 🕒 Запланировать («завтра в 10 утра»)
-  · ✏️ Изменить («короче, добавь эмодзи») · ❌ Отклонить.
-- `/posts`, `/post N` — список постов и карточка одного поста. `/status` — диагностика: LLM,
-  dry-run, компания, канал, посты по статусам, задачи планировщика.
-- «📣 Канал» — подключить Telegram-канал кнопкой «Выбрать канал»: Telegram сам предложит ваши
-  каналы и выдаст боту права. Можно и вручную: `/channel @канал`.
-- `/comments` — комментарии под постами: бот готовит ответ и присылает его на согласование
-  кнопками «Отправить / Свой ответ / Пропустить». Для этого к каналу должна быть привязана
-  группа обсуждения, а бот — её администратором.
-- **Свои фото:** пришлите боту фото — оно попадёт в фотобанк компании (`/photos`, кнопка
-  «🖼 Фотобанк»). Фото с подписью сразу превращается в пост, кнопка «🖼 Своё фото» под
-  черновиком меняет картинку (пост снова идёт на согласование).
-- **«🎨 Бренд-гид»** (`/brand`, администратор): загрузите брендбук или правила — AI будет писать и
-  описывать картинки в стиле компании. Есть готовый шаблон «Салаватстекло». Пост, нарушающий
-  гид (например, неверное написание продукта), помечается в карточке, кнопка «🛠 Исправить».
-- `/report [дни]` или кнопка «📈 Отчёт» — отчёт: публикации, реакции, комментарии, расходы,
-  график, выводы и что сделать. Автоматически — `ENABLE_WEEKLY_REPORT=true` (понедельник
-  10:00; для демо `REPORT_INTERVAL_MINUTES=5`).
+- `/start` открывает Mini App и сбрасывает текущий диалог. В личном чате можно написать
+  обычным текстом, например «Подготовь пост про стеклянные витрины на завтра в 15:00».
+  Бот уточнит компанию и недостающие параметры. Предложение появится в Mini App.
+- В Mini App можно настроить профили и материалы, вести контент-планы и согласовывать
+  публикации. Там же доступны расписание, история, отчёты, диагностика, расходы, фотобанк,
+  приглашения и согласование ответов на комментарии.
 
-**Для администратора** (ID в `ALLOWED_USER_IDS`): `/new_company Название` — добавить компанию,
-`/companies` и `/use N` — список и переключение, `/invite` — ссылка-приглашение для клиента,
-`/costs` и `/budget N` — расходы на AI и месячный лимит, `/autoreply on|off` — разрешить
-автоответ на обычные комментарии.
-Как подключить новую компанию — [docs/ONBOARDING_COMPANY.md](docs/ONBOARDING_COMPANY.md).
+[Инструкция по Mini App](docs/MINIAPP.md)
 
 ## Тесты и линтер
 
@@ -135,6 +113,39 @@ ruff format --check .
 
 ---
 
+## Локальный запуск на macOS в Docker
+
+1. Запустите Docker Desktop и включите Happ. Бот работает через long polling, поэтому
+   для сообщений Telegram входящий порт на Mac не нужен. Используйте отдельного тестового бота BotFather.
+2. Сохраните обычный текстовый UTF-8 файл `ai-marketer.env` на Рабочем столе. Формат —
+   одна строка `ИМЯ=значение`, без `export` и без расширения `.txt`.
+   Для первого теста используйте `PUBLISH_DRY_RUN=true`. Оставьте `TELEGRAM_PROXY`
+   пустым, если контейнер уже видит Telegram через сеть Mac. Настройки — в
+   [шаблоне](.env.example) и [инструкции OpenAI](docs/AI_OPTIONS.md).
+3. Поместите файл в репозиторий под именем `.env`, заполните настройки PostgreSQL, S3
+   и публичного HTTPS-адреса по [инструкции Mini App](docs/MINIAPP.md#запуск).
+
+   ```bash
+   cd /путь/к/ai-marketer
+   if [ ! -e .env ]; then install -m 600 "$HOME/Desktop/ai-marketer.env" .env; fi
+   docker compose -f docker-compose.yml -f docker-compose.miniapp.yml up -d --build
+   docker compose -f docker-compose.yml -f docker-compose.miniapp.yml ps
+   curl -fsS http://localhost:8080/readyz
+   ```
+
+   Compose получает переменные из `.env`. Этот файл исключён из Git и контекста сборки.
+
+4. Отправьте боту `/start` и откройте Mini App. Выберите профиль, добавьте материал и
+   попросите бота подготовить тестовый пост. В режиме dry-run Mini App симулирует
+   публикацию. Для реальной отправки после переключения режима создайте свежий черновик.
+
+Docker Desktop отправляет запросы контейнера через сетевой процесс на Mac. Проверка маршрута
+с включённым Happ: сравните внешний IP macOS и контейнера, затем проверьте адреса API из
+контейнера. Для OpenAI запрос к `/v1/models` без ключа должен вернуть HTTP 401. Для Telegram
+`api.telegram.org` достаточно ответа HTTP с редиректом или успешным переходом. Эта проверка
+подтверждает доступность адресов. Работу ключей подтверждает только запрос с авторизацией.
+[Сеть Docker Desktop](https://docs.docker.com/desktop/features/networking/)
+
 ## Деплой на сервер (Docker)
 
 Бот работает 24/7 на сервере, компьютер администратора не нужен. Нужен Linux-сервер с Docker
@@ -147,9 +158,8 @@ git clone git@github.com:Yralskui/ai-marketer.git /opt/ai-marketer
 cd /opt/ai-marketer
 cp .env.example .env
 nano .env        # боевой BOT_TOKEN, ALLOWED_USER_IDS, ключи LLM, PUBLISH_DRY_RUN=false
-docker compose run --rm bot python -m app.main --check
-docker compose up -d --build
-docker compose logs -f bot
+docker compose -f docker-compose.yml -f docker-compose.miniapp.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.miniapp.yml logs -f bot worker
 ```
 
 Репозиторий приватный. Для клонирования на сервере удобнее всего **deploy key**:
@@ -160,21 +170,13 @@ docker compose logs -f bot
 ```bash
 cd /opt/ai-marketer
 git pull
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.miniapp.yml up -d --build
 ```
 
-**Как устроено:**
-- БД SQLite и картинки лежат в volume `ai-marketer-data` (`/app/data` в контейнере). Пересборка
-  и перезапуск их не трогают: `docker compose restart bot` — посты, компании и расписание на
-  месте (критерий 10 ТЗ).
-- `restart: unless-stopped` — контейнер поднимается сам после сбоя и перезагрузки сервера.
-- `.env` в образ не попадает (`.dockerignore`), он подключается через `env_file`.
-- Логи ограничены: 3 файла по 10 МБ.
-- Резервная копия БД:
-  `docker compose cp bot:/app/data/app.db ./backup-$(date +%F).db`.
-- Если после обновления в логе «Схема БД устарела», значит изменились модели, а миграций
-  пока нет. Сохраните копию и удалите базу:
-  `docker compose down && docker volume rm ai-marketer-data && docker compose up -d`.
+Данные Mini App хранятся в PostgreSQL и закрытом S3, оба используют постоянные Docker
+volumes. Для резервного копирования нужны дамп PostgreSQL и копия объектов S3.
+Настройки HTTPS, воркера и остальных зависимостей описаны в
+[инструкции Mini App](docs/MINIAPP.md#запуск).
 
 Один `BOT_TOKEN` нельзя одновременно запускать на сервере и локально: Telegram отдаёт
 обновления только одному процессу. Для разработки нужен свой тестовый бот.

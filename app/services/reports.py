@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import tzinfo
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -30,14 +30,6 @@ from app.utils.time import utcnow
 log = logging.getLogger(__name__)
 
 REPORTS_DIR = IMAGES_DIR / "reports"
-
-# Цвета графиков — фирменная палитра (основная Petrol + дополнительная для диаграмм)
-CHART_BG = (255, 255, 255)
-CHART_TEXT = (40, 80, 85)  # #285055
-CHART_AXIS = (193, 208, 211)  # #C1D0D3
-CHART_REACTIONS = (25, 108, 127)  # #196C7F Petrol
-CHART_COMMENTS = (138, 204, 217)  # #8ACCD9
-CHART_MUTED = (110, 130, 135)
 
 
 @dataclass
@@ -58,7 +50,7 @@ class Report:
     def plain_text(self) -> str:
         import re
 
-        return re.sub(r"<[^>]+>", "", self.text)
+        return unescape(re.sub(r"<[^>]+>", "", self.text))
 
 
 # ---------------------------------------------------------------- выводы
@@ -163,19 +155,20 @@ def render_text(s: AnalyticsSummary, ins: Insights) -> str:
         f"💰 Расходы на AI: {s.costs_rub:.2f} ₽"
         f"{top}"
     )
+    for platform, subscribers in s.subscribers.items():
+        text += f"\n👥 Подписчики ({escape(platform)}): <b>{subscribers}</b>"
+    if s.total_views is not None:
+        text += f"\n👁 Просмотры: <b>{s.total_views}</b> по {s.posts_with_views} пост(ам)"
     text += _section("Выводы", ins.conclusions)
     text += _section("Гипотезы", ins.hypotheses)
     text += _section("Что сделать", ins.actions)
-    text += f"\n\n<i>{escape(s.limitations)}</i>"
+    if s.limitations:
+        text += f"\n\n<i>{escape(s.limitations)}</i>"
     return text
 
 
 def _font(size: int) -> ImageFont.ImageFont:
-    for name in (
-        "segoeui.ttf",  # фирменная замена по брендбуку (Windows)
-        "DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
+    for name in ("arial.ttf", "DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
         try:
             return ImageFont.truetype(name, size)
         except OSError:
@@ -183,18 +176,18 @@ def _font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def render_chart(s: AnalyticsSummary, path: Path) -> Path:
+def chart_image(s: AnalyticsSummary) -> Image.Image:
     """Столбики «реакции + комментарии» по постам периода."""
     W, H, pad = 1000, 560, 70
-    img = Image.new("RGB", (W, H), CHART_BG)
+    img = Image.new("RGB", (W, H), (248, 250, 252))
     d = ImageDraw.Draw(img)
     d.text((pad, 24), f"Отклик на посты за {s.period_days} дн. · {s.company}"[:70],
-           font=_font(26), fill=CHART_TEXT)  # fmt: skip
+           font=_font(26), fill=(15, 40, 80))  # fmt: skip
     posts = s.posts[-10:]
     base_y, top_y = H - pad, 100
-    d.line((pad, base_y, W - pad, base_y), fill=CHART_AXIS, width=2)
+    d.line((pad, base_y, W - pad, base_y), fill=(180, 190, 205), width=2)
     if not posts:
-        d.text((pad, H // 2), "Публикаций за период нет", font=_font(24), fill=CHART_MUTED)
+        d.text((pad, H // 2), "Публикаций за период нет", font=_font(24), fill=(120, 130, 150))
     else:
         peak = max(max(p.reactions + p.comments for p in posts), 1)
         slot = (W - 2 * pad) / len(posts)
@@ -203,17 +196,21 @@ def render_chart(s: AnalyticsSummary, path: Path) -> Path:
             x0 = pad + i * slot + (slot - bar) / 2
             h_r = (base_y - top_y) * p.reactions / peak
             h_c = (base_y - top_y) * p.comments / peak
-            d.rectangle((x0, base_y - h_r, x0 + bar, base_y), fill=CHART_REACTIONS)
-            d.rectangle((x0, base_y - h_r - h_c, x0 + bar, base_y - h_r), fill=CHART_COMMENTS)
+            d.rectangle((x0, base_y - h_r, x0 + bar, base_y), fill=(22, 140, 190))
+            d.rectangle((x0, base_y - h_r - h_c, x0 + bar, base_y - h_r), fill=(120, 205, 225))
             d.text((x0, base_y - h_r - h_c - 26), str(p.reactions + p.comments),
-                   font=_font(18), fill=CHART_TEXT)  # fmt: skip
-            d.text((x0, base_y + 8), f"#{p.id}", font=_font(18), fill=CHART_MUTED)
-        d.rectangle((W - 330, 30, W - 312, 48), fill=CHART_REACTIONS)
-        d.text((W - 304, 28), "реакции", font=_font(18), fill=CHART_TEXT)
-        d.rectangle((W - 200, 30, W - 182, 48), fill=CHART_COMMENTS)
-        d.text((W - 174, 28), "комментарии", font=_font(18), fill=CHART_TEXT)
+                   font=_font(18), fill=(15, 40, 80))  # fmt: skip
+            d.text((x0, base_y + 8), f"#{p.id}", font=_font(18), fill=(80, 90, 110))
+        d.rectangle((W - 330, 30, W - 312, 48), fill=(22, 140, 190))
+        d.text((W - 304, 28), "реакции", font=_font(18), fill=(60, 70, 90))
+        d.rectangle((W - 200, 30, W - 182, 48), fill=(120, 205, 225))
+        d.text((W - 174, 28), "комментарии", font=_font(18), fill=(60, 70, 90))
+    return img
+
+
+def render_chart(s: AnalyticsSummary, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(path)
+    chart_image(s).save(path)
     return path
 
 

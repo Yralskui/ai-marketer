@@ -205,3 +205,39 @@ async def test_too_long_retry_after_fails_fast():
     with pytest.raises(PublishError):
         await _publisher(bot, sleeps).publish(*_post_and_channel())
     assert sleeps == []
+
+
+async def test_telegram_publishes_formats_from_editor():
+    from unittest.mock import AsyncMock
+
+    bot = FlakyBot([])
+    bot.send_message = AsyncMock(return_value=_message())
+    post, channel = _post_and_channel()
+    post.text = (
+        "<telegram-format><b><u>Стекло</u></b> <s>старое</s> <tg-spoiler>детали</tg-spoiler> "
+        '<a href="https://example.com/?a=1&amp;b=2">сайт</a> <code>код</code> '
+        "<blockquote expandable>Цитата</blockquote> #стекло</telegram-format>"
+    )
+    await _publisher(bot, []).publish(post, channel)
+    args, kwargs = bot.send_message.await_args
+    assert args == (
+        channel.external_id,
+        post.text.removeprefix("<telegram-format>").removesuffix("</telegram-format>"),
+    )
+    assert kwargs == {"parse_mode": "HTML"}
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<a href="javascript:alert(1)">текст</a>',
+        "<b>не закрыто",
+        "<b><code>код</code></b>",
+        "<script>текст</script>",
+    ],
+)
+def test_telegram_rejects_invalid_editor_markup(markup):
+    from app.publishers.telegram_text import format_text
+
+    with pytest.raises(ValueError):
+        format_text(f"<telegram-format>{markup}</telegram-format>")

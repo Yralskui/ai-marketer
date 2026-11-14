@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.models import Business, User
@@ -14,6 +15,7 @@ from app.llm.base import LLMProvider
 
 if TYPE_CHECKING:
     from app.services.notifier import Notifier
+    from app.services.object_storage import ObjectStorage
 
 
 @dataclass
@@ -30,6 +32,18 @@ class AgentContext:
     chat_id: int | None = None
     # Что сделал агент за этот запуск (для ответа и тестов)
     created_post_ids: list[int] = field(default_factory=list)
+    reference: str = ""
+    request_id: int | None = None
+    research_llm: LLMProvider | None = None
+    web_context: str = ""
+    progress: Callable[[str], None] | None = None
+    interactive_drafts: bool = False
+    storage: ObjectStorage | None = None
+    session_factory: async_sessionmaker[AsyncSession] | None = None
+
+    def update_progress(self, stage: str) -> None:
+        if self.progress is not None:
+            self.progress(stage)
 
     @property
     def user_id(self) -> int:

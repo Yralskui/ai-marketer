@@ -21,10 +21,11 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message
 
 from app.db.models import Channel, Platform, Post
 from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
+from app.publishers.telegram_text import format_text, formatted_post
 from app.services.posts import PLATFORM_HARD_LIMITS, TELEGRAM_CAPTION_LIMIT
 
 log = logging.getLogger(__name__)
@@ -71,26 +72,77 @@ class TelegramPublisher(Publisher):
 
     async def publish(self, post: Post, channel: Channel) -> PublishResult:
         chat_id = channel.external_id
-        text = post.text[: PLATFORM_HARD_LIMITS[Platform.TELEGRAM]]
+        raw = (
+            post.text
+            if formatted_post(post.text) is not None
+            else post.text[: PLATFORM_HARD_LIMITS[Platform.TELEGRAM]]
+        )
+        text, length, mode = format_text(raw)
         try:
-            if post.image_path and Path(post.image_path).exists():
-                photo = FSInputFile(post.image_path)
-                if len(text) <= TELEGRAM_CAPTION_LIMIT:
+            items = getattr(post, "delivery_media", None)
+            if items:
+                if any(not Path(item["path"]).is_file() for item in items):
+                    raise PublishError("Вложение поста недоступно")
+                if length > TELEGRAM_CAPTION_LIMIT:
+                    raise PublishError("Подпись к медиа должна быть не длиннее 1024 символов")
+                if len(items) == 1:
+                    item = items[0]
+                    send = getattr(
+                        self.bot,
+                        "send_"
+                        + {
+                            "video": "video",
+                            "document": "document",
+                        }.get(item["type"], "photo"),
+                    )
                     msg = await self._call(
-                        lambda: self.bot.send_photo(chat_id, photo, caption=text, parse_mode=None)
+                        lambda: send(
+                            chat_id,
+                            FSInputFile(
+                                item["path"],
+                                filename=item["name"] if item["type"] == "document" else None,
+                            ),
+                            caption=text,
+                            parse_mode=mode,
+                        )
+                    )
+                else:
+                    album = []
+                    for index, item in enumerate(items):
+                        kind = {
+                            "video": InputMediaVideo,
+                            "document": InputMediaDocument,
+                        }.get(item["type"], InputMediaPhoto)
+                        album.append(
+                            kind(
+                                media=FSInputFile(
+                                    item["path"],
+                                    filename=item["name"] if item["type"] == "document" else None,
+                                ),
+                                caption=text if index == 0 else None,
+                                parse_mode=mode,
+                            )
+                        )
+                    sent = await self._call(lambda: self.bot.send_media_group(chat_id, album))
+                    msg = sent[0]
+            elif post.image_path and Path(post.image_path).exists():
+                photo = FSInputFile(post.image_path)
+                if length <= TELEGRAM_CAPTION_LIMIT:
+                    msg = await self._call(
+                        lambda: self.bot.send_photo(chat_id, photo, caption=text, parse_mode=mode)
                     )
                 else:
                     # Подпись к фото ограничена 1024 символами — шлём фото и текст отдельно.
                     # Каждый вызов повторяется сам по себе, фото не уйдёт дважды.
                     await self._call(lambda: self.bot.send_photo(chat_id, photo))
                     msg = await self._call(
-                        lambda: self.bot.send_message(chat_id, text, parse_mode=None)
+                        lambda: self.bot.send_message(chat_id, text, parse_mode=mode)
                     )
             else:
                 if post.image_path:
                     log.warning("Картинка поста #%s не найдена: %s", post.id, post.image_path)
                 msg = await self._call(
-                    lambda: self.bot.send_message(chat_id, text, parse_mode=None)
+                    lambda: self.bot.send_message(chat_id, text, parse_mode=mode)
                 )
         except TelegramNetworkError as exc:
             raise PublishError(

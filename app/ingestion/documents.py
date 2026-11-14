@@ -7,7 +7,7 @@ import io
 from pathlib import Path
 
 SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
-MAX_DOCUMENT_BYTES = 20 * 1024 * 1024  # лимит Telegram Bot API на скачивание
+MAX_DOCUMENT_BYTES = 20_000_000  # лимит Telegram Bot API на скачивание
 
 
 class UnsupportedDocumentError(ValueError):
