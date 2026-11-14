@@ -369,3 +369,11 @@ async def test_metrics_calendar_and_profile_isolation(settings, db):
         await client.post(base + "profiles", headers=headers, json={"name": "Другой канал"})
         response = await client.get(base + "metrics?hours=168", headers=headers)
         assert (await response.json())["channels"] == []
+
+
+def test_frontend_images_respect_csp():
+    """CSP страницы не разрешает data:-картинки — слайды и превью должны идти через blob:."""
+    from app.web.miniapp import ASSETS, SECURITY
+
+    assert "data:" not in SECURITY["Content-Security-Policy"].split("img-src")[1].split(";")[0]
+    assert "data:image" not in (ASSETS / "ui.js").read_text(encoding="utf-8")

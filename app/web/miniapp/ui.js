@@ -27,6 +27,7 @@ let tab = "profile";
 let initial = true;
 let sending = false;
 let previewUrl;
+let slideUrls = [];
 let noticeTimer;
 
 /* ---------- Базовые помощники ---------- */
@@ -232,6 +233,8 @@ telegram?.BackButton?.onClick?.(closeSheet);
 sheet.addEventListener("close", () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = undefined;
+    slideUrls.forEach((url) => URL.revokeObjectURL(url));
+    slideUrls = [];
     telegram?.BackButton?.hide?.();
 });
 refresh.addEventListener("click", () => guarded(refresh, async () => {
@@ -813,10 +816,16 @@ async function carouselSheet(post) {
     const body = el("section");
     body.append(el("p", "Слайды собраны из текста поста в фирменном стиле. Пришлю их вам в чат с ботом альбомом — его можно переслать в канал.", "muted"));
     const strip = el("div", undefined, "slides");
-    data.slides.forEach((encoded, index) => {
+    // CSP страницы разрешает картинки только из self, https: и blob:, поэтому не data:
+    slideUrls.forEach((url) => URL.revokeObjectURL(url));
+    slideUrls = data.slides.map((encoded) => {
+        const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+        return URL.createObjectURL(new Blob([bytes], {type: "image/png"}));
+    });
+    slideUrls.forEach((url, index) => {
         const image = el("img", undefined, "slide");
         image.alt = "Слайд " + (index + 1);
-        image.src = "data:image/png;base64," + encoded;
+        image.src = url;
         strip.append(image);
     });
     body.append(strip, button("Прислать мне в чат (" + data.slides.length + " сл.)", async () => {
