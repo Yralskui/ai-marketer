@@ -401,3 +401,7 @@ button.tile { gap: 9px; padding: 10px; }
 .brand-box strong { display: flex; align-items: center; gap: 6px; }
 .brand-box ul { margin: 0; padding-inline-start: 20px; color: var(--ink); }
 .brand-box button { justify-self: start; }
+button.status { min-height: 0; border: 0; cursor: pointer; }
+button.status:disabled { cursor: default; opacity: 1; }
+button.status:hover { filter: brightness(.96); }
+.steps { margin: 0; padding-inline-start: 20px; display: grid; gap: 6px; color: var(--ink); }

@@ -503,7 +503,7 @@ function setupChecklist(company) {
     const steps = [
         ["Заполнить профиль компании", filled >= 6, () => profileForm(company)],
         ["Загрузить материалы (брендбук, каталог)", state.documents.length > 0, () => openTab("profile")],
-        ["Подключить Telegram-канал", Boolean(company.channel), () => profileForm(company)],
+        ["Подключить Telegram-канал", Boolean(company.channel), () => channelSheet(company)],
         ["Утвердить первый пост", Boolean(approvedOnce), () => document.querySelector(".hero textarea")?.focus()],
     ];
     const done = steps.filter(([, ok]) => ok).length;
@@ -1086,8 +1086,13 @@ function profile(company) {
         const name = el("div");
         name.append(el("h2", company.name));
         const badges = el("div", undefined, "row");
-        badges.append(el("span", company.channel ? "Канал: " + company.channel : "Канал не подключён",
-            company.channel ? "status" : "status warn"));
+        const channelChip = el("button", company.channel ? "Канал: " + company.channel : "Подключить канал",
+            company.channel ? "status" : "status warn");
+        channelChip.type = "button";
+        channelChip.prepend(icon("megaphone"));
+        channelChip.disabled = !company.editable;
+        channelChip.addEventListener("click", () => channelSheet(company));
+        badges.append(channelChip);
         if (company.preset) {
             const shield = el("span", "Стандартный · защищён", "status ok");
             shield.prepend(icon("shield-check"));
@@ -1164,6 +1169,52 @@ function profile(company) {
     const fullName = [state.user.first_name, state.user.last_name].filter(Boolean).join(" ");
     screen.append(el("p", "Вы вошли как " + (fullName || "пользователь Telegram") +
         (state.user.username ? " (@" + state.user.username + ")" : ""), "footnote"));
+}
+
+/** Подключение канала по шагам: что сделать в Telegram и куда вписать адрес. */
+function channelSheet(company) {
+    const form = el("form");
+    if (company.channel) {
+        const current = el("div", undefined, "card toggle-card");
+        const text = el("div");
+        text.append(el("strong", company.channel), el("p", "Посты публикуются в этот канал", "muted"));
+        current.append(text, button("Отключить", async () => {
+            if (!await confirmAction("Отключить канал? Публикации остановятся.")) return;
+            await api("profile", "PATCH", {company: company.id, channel: ""});
+            closeSheet();
+            await load();
+            feedback("Канал отключён");
+        }, "danger small"));
+        form.append(current);
+    }
+    const steps = el("ol", undefined, "steps");
+    for (const step of [
+        "Откройте канал в Telegram → «Управление каналом» → «Администраторы».",
+        "Добавьте бота-маркетолога и включите право «Публикация сообщений».",
+        "Впишите адрес канала ниже и нажмите «Проверить и подключить».",
+    ]) steps.append(el("li", step));
+    const label = el("label", "Адрес канала");
+    const input = el("input");
+    input.required = true;
+    input.autocomplete = "off";
+    input.placeholder = "@my_channel или https://t.me/my_channel";
+    input.value = company.channel || "";
+    label.append(input, el("small", "Для закрытого канала — ID вида -100…; подключить может только админ канала", "hint"));
+    const submit = el("button", "Проверить и подключить", "primary");
+    submit.prepend(icon("link"));
+    form.append(steps, label, submit);
+    form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        guarded(submit, async () => {
+            await api("profile", "PATCH", {company: company.id, channel: input.value.trim()});
+            haptic("success");
+            closeSheet();
+            await load();
+            feedback("Канал подключён — бот может публиковать", "success");
+        });
+    });
+    showSheet(company.channel ? "Канал компании" : "Подключить канал", form);
+    if (!company.channel) input.focus();
 }
 
 function management(company) {

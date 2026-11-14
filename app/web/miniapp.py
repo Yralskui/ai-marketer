@@ -1021,7 +1021,10 @@ class MiniApp:
             if existing is None or existing.external_id != channel:
                 bot = self.container.bot
                 if bot is None:
-                    raise ValueError("Проверка канала недоступна")
+                    raise ValueError(
+                        "Бот сейчас не подключён к Telegram, поэтому канал не проверить. "
+                        "Подключите канал, когда бот запущен на сервере."
+                    )
                 try:
                     chat_id = int(channel) if channel.startswith("-100") else channel
                     me = await bot.me()
