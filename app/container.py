@@ -51,6 +51,7 @@ class AppContainer:
     upload_links: UploadLinks = field(default_factory=UploadLinks)
     storage: ObjectStorage | None = None
     analytics_sources: dict[Platform, AnalyticsSource] = field(default_factory=dict)
+    vk_clients: VKClients | None = None
 
 
 def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
@@ -121,5 +122,6 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         notifier=notifier,
         bot=bot,
         analytics_sources=analytics_sources,
+        vk_clients=vk_clients if vk_clients else None,
         storage=ObjectStorage(settings) if settings.s3_endpoint else None,
     )

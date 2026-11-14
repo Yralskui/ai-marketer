@@ -319,3 +319,7 @@ async def weekly_report_job(container: AppContainer) -> None:
 
 async def collect_social_metrics(container: AppContainer) -> None:
     await social_metrics.collect_hour(container.db.sessionmaker, container.analytics_sources)
+    if container.vk_clients is not None:
+        from app.services import vk_engagement
+
+        await vk_engagement.sync_engagement(container.db.sessionmaker, container.vk_clients)

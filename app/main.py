@@ -90,6 +90,7 @@ async def run_bot(settings: Settings) -> None:
     if container.storage is not None:
         await container.storage.prepare()
     upload_runner = None
+    longpoll_stop = None
     try:
         me = await bot.me()
         log.info(
@@ -114,8 +115,16 @@ async def run_bot(settings: Settings) -> None:
                 log.info("Не удалось задать меню команд для %s", admin_id)
         upload_runner = await start_upload_server(container)
         scheduler.start()
+        if container.vk_clients is not None:
+            from app.services import vk_engagement
+
+            longpoll_stop, _ = await vk_engagement.start_longpolls(
+                container.db.sessionmaker, container.vk_clients
+            )
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if longpoll_stop is not None:
+            longpoll_stop.set()
         if upload_runner is not None:
             await upload_runner.cleanup()
         if scheduler.running:

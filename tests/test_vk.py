@@ -17,14 +17,15 @@ from PIL import Image
 
 from app.config import Settings, parse_vk_communities
 from app.container import build_container
-from app.db.models import Channel, Platform, Post, PostStatus
+from app.db.models import Channel, Comment, Platform, Post, PostStatus
 from app.db.repositories import ChannelRepo
+from app.db.repositories.post_metric import PostMetricRepo
 from app.publishers.analytics import AnalyticsError
 from app.publishers.base import Publisher, PublishError
 from app.publishers.vk import VKPublisher, group_id_of, parse_community
 from app.publishers.vk_analytics import VKAnalytics
 from app.publishers.vk_api import VKClient, VKClients, VKError
-from app.services import posts, social_metrics, vk_channel
+from app.services import posts, social_metrics, vk_channel, vk_engagement
 from app.services.publishing import PublishingService
 from app.utils.time import utcnow
 from app.web.miniapp import MiniApp
@@ -43,6 +44,7 @@ COMMUNITY_KEY_FORBIDDEN = {
     "photos.getWallUploadServer",
     "photos.saveWallPhoto",
     "wall.getById",
+    "wall.getComments",
     "wall.get",
     "wall.edit",
     "wall.delete",
@@ -68,6 +70,7 @@ class FakeVK:
         self.restricted = False
         # HTTP-статусы, которыми сервер загрузки ответит первыми (например, 405 как на живом ВК)
         self.upload_statuses: list[int] = []
+        self.comments: dict[int, list[dict]] = {}
 
     def methods(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -142,6 +145,17 @@ class FakeVK:
         if method == "wall.getById":
             ids = [int(ref.rsplit("_", 1)[1]) for ref in form["posts"].split(",")]
             return {"response": {"items": [self.wall[i] for i in ids if i in self.wall]}}
+        if method == "wall.getComments":
+            page = self.comments.get(int(form["post_id"]), [])
+            offset, count = int(form.get("offset", 0)), int(form["count"])
+            return {
+                "response": {
+                    "count": len(page),
+                    "items": page[offset : offset + count],
+                    "profiles": [{"id": 5, "first_name": "Анна", "last_name": "Иванова"}],
+                    "groups": [],
+                }
+            }
         if method == "wall.edit":
             self.wall[int(form["post_id"])]["text"] = form["message"]
             return {"response": 1}
@@ -865,3 +879,162 @@ async def test_miniapp_publish_with_community_key_explains_missing_picture(setti
 
         diagnostics = await (await client.get(api + "diagnostics", headers=headers)).json()
         assert "Ключ сообщества" in diagnostics["vk_check"]["message"]
+
+
+# ----------------------------------------------------------------------------- лайки и комментарии
+
+
+async def _published(session, company, external_id):
+    link = await ChannelRepo(session).upsert(company.id, Platform.VK, str(GROUP), "САЛАВАТСТЕКЛО")
+    row = Post(
+        business_id=company.id,
+        channel_id=link.id,
+        platform=Platform.VK,
+        text="Опубликован",
+        status=PostStatus.PUBLISHED,
+        external_id=external_id,
+        published_at=utcnow(),
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def test_admin_token_sync_pulls_likes_and_all_comments(db, session, owner, clients, vk):
+    _, company = owner
+    result = await VKPublisher(clients).publish(post(), channel())
+    row = await _published(session, company, result.external_id)
+    vk_id = int(result.external_id)
+    vk.wall[vk_id]["likes"] = {"count": 7}
+    vk.wall[vk_id]["comments"] = {"count": 3}
+    vk.comments[vk_id] = [
+        {
+            "id": 1,
+            "from_id": 5,
+            "text": "Красиво!",
+            "thread": {"items": [{"id": 2, "from_id": -GROUP, "text": "Спасибо"}]},
+        },
+        {"id": 3, "from_id": 5, "text": "Сколько стоит?"},
+    ]
+    stats = await vk_engagement.sync_engagement(db.sessionmaker, clients)
+    assert stats["comments"] == 3
+    again = await vk_engagement.sync_engagement(db.sessionmaker, clients)
+    assert again["comments"] == 0  # повторная сверка дублей не создаёт
+    async with db.sessionmaker() as check:
+        metric = await PostMetricRepo(check).get_for_post(row.id)
+        assert metric.reactions_total == 7
+        comments = (await check.execute(Comment.__table__.select())).all()
+        assert sorted(c.text for c in comments) == ["Красиво!", "Сколько стоит?", "Спасибо"]
+        assert {c.author_name for c in comments} == {"Анна Иванова", "Сообщество"}
+
+
+async def test_community_key_sync_is_silent_on_error_27(db, session, owner, vk):
+    _, company = owner
+    vk.restricted = True
+    restricted = VKClients({GROUP: TOKEN}, transport=vk.transport(), sleep=no_sleep)
+    await _published(session, company, "100")
+    stats = await vk_engagement.sync_engagement(db.sessionmaker, restricted)
+    assert stats["skipped_no_access"] == 1 and stats["comments"] == 0
+
+
+async def test_longpoll_events_update_comments_and_likes(db, session, owner):
+    _, company = owner
+    row = await _published(session, company, "100")
+    apply = vk_engagement.apply_event
+    await apply(
+        db.sessionmaker,
+        GROUP,
+        {
+            "type": "wall_reply_new",
+            "object": {"id": 9, "post_id": 100, "from_id": 5, "text": "Привет"},
+        },
+    )
+    await apply(
+        db.sessionmaker,
+        GROUP,
+        {
+            "type": "wall_reply_new",
+            "object": {"id": 9, "post_id": 100, "from_id": 5, "text": "Привет"},
+        },
+    )  # дубль
+    await apply(
+        db.sessionmaker,
+        GROUP,
+        {
+            "type": "wall_reply_edit",
+            "object": {"id": 9, "post_id": 100, "from_id": 5, "text": "Привет!"},
+        },
+    )
+    for kind in ("like_add", "like_add", "like_remove"):
+        await apply(
+            db.sessionmaker,
+            GROUP,
+            {
+                "type": kind,
+                "object": {"object_type": "post", "object_owner_id": -GROUP, "object_id": 100},
+            },
+        )
+    # чужая запись и чужой тип лайка не должны ничего менять
+    await apply(
+        db.sessionmaker,
+        GROUP,
+        {
+            "type": "like_add",
+            "object": {"object_type": "photo", "object_owner_id": -GROUP, "object_id": 100},
+        },
+    )
+    await apply(
+        db.sessionmaker,
+        GROUP,
+        {
+            "type": "wall_reply_new",
+            "object": {"id": 10, "post_id": 555, "from_id": 5, "text": "мимо"},
+        },
+    )
+    async with db.sessionmaker() as check:
+        rows = (await check.execute(Comment.__table__.select())).all()
+        assert [(c.message_id, c.text) for c in rows] == [(9, "Привет!")]
+        assert (await PostMetricRepo(check).get_for_post(row.id)).reactions_total == 1
+    await apply(db.sessionmaker, GROUP, {"type": "wall_reply_delete", "object": {"id": 9}})
+    async with db.sessionmaker() as check:
+        assert (await check.execute(Comment.__table__.select())).all() == []
+
+
+async def test_longpoll_loop_handles_stale_key_and_stops(db, session, owner, vk):
+    import asyncio
+
+    _, company = owner
+    await _published(session, company, "100")
+    client = VKClient(TOKEN, transport=vk.transport(), sleep=no_sleep)
+    original = vk.respond
+    vk.respond = lambda m, f: (
+        {"response": {"server": "https://lp.vk.test/x", "key": "k", "ts": "1"}}
+        if m == "groups.getLongPollServer"
+        else original(m, f)
+    )
+    stop = asyncio.Event()
+    answers = [
+        {"failed": 2},
+        {
+            "ts": "5",
+            "updates": [
+                {
+                    "type": "wall_reply_new",
+                    "object": {"id": 1, "post_id": 100, "from_id": 5, "text": "ок"},
+                }
+            ],
+        },
+    ]
+
+    async def http_get(url, params):
+        if not answers:
+            stop.set()
+            return {"ts": "6"}
+        return answers.pop(0)
+
+    await vk_engagement.run_longpoll(
+        db.sessionmaker, client, GROUP, http_get=http_get, stop=stop, pause=no_sleep
+    )
+    assert vk.methods().count("groups.getLongPollServer") == 2  # после failed=2 — новый адрес
+    async with db.sessionmaker() as check:
+        assert len((await check.execute(Comment.__table__.select())).all()) == 1
