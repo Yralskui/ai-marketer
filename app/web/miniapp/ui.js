@@ -1477,6 +1477,8 @@ const profileImageExtensions = new Set(
     "png apng jpg jpeg jfif webp gif bmp dib tif tiff heic heif avif ico icns jp2 j2k jpf jpx ppm pgm pbm pnm tga qoi psd svg".split(" ")
 );
 const profileFileLimit = 100_000_000;
+const profileImageLimit = 5;
+const profileDocumentExtensions = new Set(["pdf","docx","txt","md"]);
 const fileExtension = name => name.includes(".") ? name.split(".").at(-1).toLowerCase() : "";
 
 const fileSymbols = {
@@ -1503,7 +1505,7 @@ function fileTile(item, company, remove) {
     const kind = isImage ? "image" : suffix === "pdf" ? "pdf" : "text";
     square.dataset.kind = kind;
     square.append(chatIcon(fileSymbols[kind]));
-    if (kind === "pdf") square.append(el("span","PDF"));
+    if (kind !== "image") square.append(el("span",suffix.toUpperCase()));
     const close = button("",remove,"profile-file-remove");
     close.setAttribute("aria-label","Удалить " + item.name);
     close.append(chatIcon("M6 6l12 12M18 6L6 18"));
@@ -1613,13 +1615,21 @@ function profileForm(company) {
     picker.type = "file";
     picker.multiple = true;
     picker.hidden = true;
-    picker.accept = ["image/*",".pdf",...[...profileImageExtensions].map(suffix => "." + suffix)].join(",");
+    picker.accept = ["image/*",...[...profileDocumentExtensions].map(suffix => "." + suffix),
+        ...[...profileImageExtensions].map(suffix => "." + suffix)].join(",");
     picker.addEventListener("change",() => {
         const files = [...picker.files];
         picker.value = "";
         if (!files.length) return;
-        if (files.some(file => fileExtension(file.name) !== "pdf" && !profileImageExtensions.has(fileExtension(file.name)))) {
-            showFileError("Принимаются изображения и PDF. Презентации экспортируйте в PDF.");
+        if (files.some(file => !profileDocumentExtensions.has(fileExtension(file.name)) && !profileImageExtensions.has(fileExtension(file.name)))) {
+            showFileError("Принимаются PDF, Word (.docx), текстовые файлы (.txt, .md) и изображения. Презентации экспортируйте в PDF.");
+            return;
+        }
+        const imageNames = item => profileImageExtensions.has(fileExtension(item.name));
+        const savedImages = (company ? state.documents : []).filter(imageNames).length;
+        const pendingImages = [...pending.keys()].filter(imageNames).length;
+        if (savedImages + pendingImages + files.filter(imageNames).length > profileImageLimit) {
+            showFileError("Отдельных картинок в профиле не больше " + profileImageLimit + ". Остальные добавьте внутри PDF.");
             return;
         }
         if (files.some(file => !file.size) ||
@@ -1631,7 +1641,7 @@ function profileForm(company) {
         for (const file of files) pending.set(file,addTile({name:file.name,file}));
     });
     const add = button("Добавить файлы +",() => picker.click(),"profile-add-files");
-    form.append(el("h3","Файлы профиля"),el("p","Изображения и PDF · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
+    form.append(el("h3","Файлы профиля"),el("p","PDF, Word, TXT, MD и до " + profileImageLimit + " картинок · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
     const submit = el("button","Сохранить профиль","primary");
     form.append(submit);
     form.addEventListener("submit", event => {

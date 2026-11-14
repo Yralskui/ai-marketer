@@ -1,4 +1,15 @@
-"""Преобразование материала в тематические Markdown-фрагменты."""
+"""Преобразование материала в сжатые тематические Markdown-фрагменты для поиска.
+
+Правила обработки (чтобы не платить за лишнее и не терять смысл):
+
+* один файл — один вызов лёгкой модели для всего текста файла: у файлов разные темы, склеивать
+  их в один запрос нет смысла;
+* тяжёлая модель смотрит только то, что нельзя прочитать текстом: до 10 «визуальных» страниц
+  PDF (брендбук: палитра, шрифты, стиль) и отдельные картинки, сжатые до Full HD;
+* чисто текстовые PDF, Word и текстовые файлы читаются как текст, без картинок;
+* описание сжатое, с максимальной плотностью: цвета, шрифты и факты о компании, без отступов
+  и вёрстки — посты пишутся текстом.
+"""
 
 from __future__ import annotations
 
@@ -9,18 +20,20 @@ from typing import Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-from pypdf import PdfReader, PdfWriter
 
 from app.agent.prompts import render_prompt
 from app.config import Settings
 from app.db.knowledge import EMBEDDING_DIMENSIONS
 from app.ingestion.documents import extract_text
-from app.ingestion.profile_files import IMAGE_EXTENSIONS, render_profile_image
+from app.ingestion.pdf_pages import analyze_pdf, pick_visual_pages, write_pages
+from app.ingestion.profile_files import IMAGE_EXTENSIONS, fit_image_for_model
 
-PAGE_BATCH = 6
-MAX_PAGES = 180
-MAX_TEXT = 2_000_000
+MAX_PAGES = 400
+MAX_TEXT = 500_000  # символов текста на один файл
 MAX_FILE_INPUT = 35_000_000
+PROFILE_CONTEXT_CHARS = 2_000  # профиль в промпте нужен только для контекста
+CHUNK_CHARS = 3_000
+MAX_CHUNKS = 12
 
 
 class Chunk(BaseModel):
@@ -33,44 +46,28 @@ class MaterialSummary(BaseModel):
     chunks: list[Chunk]
 
 
-def pdf_parts(path: Path, output: Path):
-    reader = PdfReader(path)
-    if len(reader.pages) > MAX_PAGES:
-        raise ValueError("PDF: не более 180 страниц на файл")
-
-    def split(first: int, end: int):
-        writer = PdfWriter()
-        for page in range(first, end):
-            writer.add_page(reader.pages[page])
-        part = output / f"pages-{first + 1}-{end}.pdf"
-        writer.write(part)
-        if part.stat().st_size > MAX_FILE_INPUT:
-            part.unlink()
-            if end - first == 1:
-                raise ValueError("Одна страница PDF превышает предел визуального запроса")
-            mid = (first + end) // 2
-            return split(first, mid) + split(mid, end)
-        return [(first + 1, part)]
-
-    return [
-        part
-        for first in range(0, len(reader.pages), PAGE_BATCH)
-        for part in split(first, min(first + PAGE_BATCH, len(reader.pages)))
-    ]
-
-
-def text_parts(path: Path) -> list[str]:
+def read_text_file(path: Path) -> str:
+    """Текст .docx/.txt/.md. Слишком большой документ отклоняется, а не обрезается молча."""
     data = path.read_bytes()
-    if path.suffix == ".docx":
+    if path.suffix.lower() == ".docx":
         text = extract_text(path.name, data)
     else:
         try:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = data.decode("cp1251")
-    if not text.strip() or len(text) > MAX_TEXT:
-        raise ValueError("Пустой документ или слишком большой объём текста")
-    return [text[index : index + 30_000] for index in range(0, len(text), 30_000)]
+    return _checked_text(text)
+
+
+def _checked_text(text: str) -> str:
+    text = text.strip()
+    if not text:
+        raise ValueError("В документе нет текста")
+    if len(text) > MAX_TEXT:
+        raise ValueError(
+            f"Слишком большой документ: больше {MAX_TEXT:,} символов".replace(",", " ")
+        )
+    return text
 
 
 class KnowledgeModels:
@@ -80,52 +77,82 @@ class KnowledgeModels:
             api_key=settings.llm_api_key, base_url=settings.llm_base_url, timeout=180, max_retries=1
         )
 
+    @property
+    def light_model(self) -> str:
+        return self.settings.llm_model_light or self.settings.llm_model or "gpt-6-luna"
+
+    @property
+    def heavy_model(self) -> str:
+        return self.settings.llm_model_heavy or self.light_model
+
     async def analyze(self, path: Path, profile: str) -> list[str]:
         suffix = path.suffix.lower()
-        system = render_prompt("analyze_material", profile=profile[:8_000])
+        context = profile[:PROFILE_CONTEXT_CHARS]
+        text_system = render_prompt("analyze_text", profile=context)
+        visual_system = render_prompt("analyze_visual", profile=context)
         if suffix == ".pdf":
-            parts = await asyncio.to_thread(pdf_parts, path, path.parent)
-            inputs = []
-            for first, part in parts:
-                inputs.append((f"PDF, страницы начиная с {first}", part))
-            results = []
-            for label, part in inputs:
-                content = await asyncio.to_thread(part.read_bytes)
-                results.extend(
-                    await self._summarize(
-                        system,
-                        label,
-                        {
-                            "type": "input_file",
-                            "filename": part.name,
-                            "file_data": "data:application/pdf;base64,"
-                            + base64.b64encode(content).decode(),
-                        },
-                    )
-                )
-            return results
+            return await self._analyze_pdf(path, text_system, visual_system)
         if suffix in IMAGE_EXTENSIONS:
-            content = await asyncio.to_thread(render_profile_image, path, suffix, 2400, "JPEG")
+            content = await asyncio.to_thread(fit_image_for_model, path, suffix)
             return await self._summarize(
-                system,
-                "Визуальный референс",
+                self.heavy_model,
+                visual_system,
+                "Изображение",
                 {
                     "type": "input_image",
                     "detail": "high",
                     "image_url": "data:image/jpeg;base64," + base64.b64encode(content).decode(),
                 },
             )
-        results = []
-        for part in await asyncio.to_thread(text_parts, path):
-            results.extend(
-                await self._summarize(
-                    system, "Текстовый источник", {"type": "input_text", "text": part}
-                )
+        text = await asyncio.to_thread(read_text_file, path)
+        return await self._summarize(
+            self.light_model,
+            text_system,
+            "Текстовый документ",
+            {"type": "input_text", "text": text},
+        )
+
+    async def _analyze_pdf(self, path: Path, text_system: str, visual_system: str) -> list[str]:
+        analysis = await asyncio.to_thread(analyze_pdf, path, MAX_PAGES)
+        results: list[str] = []
+        if analysis.has_text:
+            text = _checked_text(analysis.text)
+            results += await self._summarize(
+                self.light_model,
+                text_system,
+                f"PDF ({analysis.kind}), текст документа",
+                {"type": "input_text", "text": text},
             )
+        numbers = pick_visual_pages(analysis)
+        if numbers:
+            part = path.parent / "visual-pages.pdf"
+            while True:
+                await asyncio.to_thread(write_pages, path, numbers, part)
+                if part.stat().st_size <= MAX_FILE_INPUT or len(numbers) == 1:
+                    break
+                numbers = numbers[:-1]  # не влезло в запрос — убираем последнюю страницу
+            if part.stat().st_size > MAX_FILE_INPUT:
+                raise ValueError("Страница PDF превышает предел визуального запроса")
+            content = await asyncio.to_thread(part.read_bytes)
+            pages = ", ".join(map(str, numbers))
+            results += await self._summarize(
+                self.heavy_model,
+                visual_system,
+                f"PDF, страницы {pages}",
+                {
+                    "type": "input_file",
+                    "filename": part.name,
+                    "file_data": "data:application/pdf;base64,"
+                    + base64.b64encode(content).decode(),
+                },
+            )
+        if not results:
+            raise ValueError("В PDF не нашлось ни текста, ни страниц для просмотра")
         return results
 
-    async def _summarize(self, instructions: str, label: str, material: dict) -> list[str]:
-        model = self.settings.llm_model_heavy or self.settings.llm_model_light or "gpt-6-luna"
+    async def _summarize(
+        self, model: str, instructions: str, label: str, material: dict
+    ) -> list[str]:
         response = await self.client.responses.parse(
             model=model,
             instructions=instructions,
@@ -138,8 +165,9 @@ class KnowledgeModels:
         if parsed is None or not parsed.chunks:
             raise ValueError("Модель не вернула описание материала")
         return [
-            f"## {chunk.title[:160]}\n\nИсточник: {label}\nРаздел: {chunk.category}\n\n{chunk.markdown[:9000]}"
-            for chunk in parsed.chunks[:20]
+            f"## {chunk.title[:160]}\n\nИсточник: {label}\nРаздел: {chunk.category}\n\n"
+            f"{chunk.markdown[:CHUNK_CHARS]}"
+            for chunk in parsed.chunks[:MAX_CHUNKS]
             if chunk.markdown.strip()
         ]
 

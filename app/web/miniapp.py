@@ -98,6 +98,7 @@ from app.services import (
 )
 from app.services.document_uploads import (
     DocumentQuotaError,
+    ImageLimitError,
     remaining_bytes,
     save_document,
     stage_document,
@@ -1707,6 +1708,8 @@ class MiniApp:
                 await save_document(session, company, name, path, storage=self.container.storage)
         except ProfileFileFormatError as exc:
             return json_response({"error": str(exc)}, 415)
+        except ImageLimitError as exc:
+            return json_response({"error": str(exc)}, 413)
         except DocumentQuotaError:
             return json_response({"error": "Файл не помещается в общую квоту 100 МБ"}, 413)
         except TimeoutError:

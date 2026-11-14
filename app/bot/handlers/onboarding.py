@@ -32,6 +32,7 @@ from app.llm.base import LLMError
 from app.services import business_profile
 from app.services.document_uploads import (
     DocumentQuotaError,
+    ImageLimitError,
     remaining_bytes,
     save_document,
     stage_document,
@@ -140,6 +141,9 @@ async def on_document(
             try:
                 await asyncio.to_thread(validate_profile_file, filename, path)
                 await save_document(session, business, filename, path, storage=container.storage)
+            except ImageLimitError as exc:
+                await message.answer(str(exc))
+                return
             except DocumentQuotaError:
                 await message.answer(texts.UPLOAD_QUOTA)
                 return

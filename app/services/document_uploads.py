@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import DATA_DIR
 from app.db.knowledge import ProfileDocument
 from app.db.models import Business, EventLog, EventType, Source, SourceType
+from app.ingestion.profile_files import IMAGE_EXTENSIONS, MAX_PROFILE_IMAGES
 from app.services.business_profile import add_source
 
 if TYPE_CHECKING:
@@ -33,6 +34,25 @@ MAX_PENDING_LINKS = 500
 
 class DocumentQuotaError(ValueError):
     """Файл не помещается в квоту компании."""
+
+
+class ImageLimitError(DocumentQuotaError):
+    """В профиле уже максимум отдельных картинок: каждую смотрит тяжёлая модель."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"В профиле может быть не больше {MAX_PROFILE_IMAGES} отдельных картинок. "
+            "Удалите лишнюю или добавьте картинки в PDF."
+        )
+
+
+async def image_count(session: AsyncSession, business_id: int) -> int:
+    names = await session.scalars(
+        select(ProfileDocument.filename).where(
+            ProfileDocument.business_id == business_id, ProfileDocument.status != "deleted"
+        )
+    )
+    return sum(1 for name in names if Path(name).suffix.lower() in IMAGE_EXTENSIONS)
 
 
 async def remaining_bytes(session: AsyncSession, business_id: int) -> int:
@@ -136,6 +156,11 @@ async def save_to_storage(
     if previous and previous.status != "deleted":
         await session.commit()
         return
+    if (
+        Path(filename).suffix.lower() in IMAGE_EXTENSIONS
+        and await image_count(session, business.id) >= MAX_PROFILE_IMAGES
+    ):
+        raise ImageLimitError
     if size > await remaining_bytes(session, business.id):
         raise DocumentQuotaError
     if previous is not None:

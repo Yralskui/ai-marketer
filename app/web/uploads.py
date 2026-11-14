@@ -25,6 +25,7 @@ from app.services.accounts import is_admin
 from app.services.document_uploads import (
     PROFILE_DOCUMENT_BYTES,
     DocumentQuotaError,
+    ImageLimitError,
     UploadGrant,
     remaining_bytes,
     save_document,
@@ -153,6 +154,8 @@ class UploadServer:
                     await save_document(
                         session, company, filename, path, storage=self.container.storage
                     )
+                except ImageLimitError as exc:
+                    return response(413, str(exc))
                 except DocumentQuotaError:
                     return response(413, "Файл превышает остаток лимита профиля в 100 МБ.")
                 except ProfileFileFormatError as exc:
