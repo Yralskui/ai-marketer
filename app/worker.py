@@ -157,11 +157,11 @@ async def main() -> None:
     logging.basicConfig(level=settings.log_level)
     db = Database(settings.effective_database_url)
     storage = ObjectStorage(settings)
-    models = KnowledgeModels(settings)
-    await db.create_all()
-    await storage.prepare()
     # Без ключа OpenAI материалы не разбираем: пусть ждут в очереди, а не падают с ошибкой
     can_process = bool(settings.llm_api_key)
+    models = KnowledgeModels(settings) if can_process else None
+    await db.create_all()
+    await storage.prepare()
     if not can_process:
         log.warning("LLM_API_KEY не задан: материалы останутся в очереди до появления ключа")
     try:
@@ -171,7 +171,7 @@ async def main() -> None:
                 if can_process:
                     async with db.sessionmaker() as session:
                         document = await claim(session)
-                if document is not None:
+                if document is not None and models is not None:
                     await process(db, storage, models, document)
                 elif not await cleanup_one(db, storage):
                     await asyncio.sleep(2)
@@ -179,7 +179,8 @@ async def main() -> None:
                 log.exception("Ошибка очереди материалов")
                 await asyncio.sleep(5)
     finally:
-        await models.close()
+        if models is not None:
+            await models.close()
         await db.dispose()
 
 
