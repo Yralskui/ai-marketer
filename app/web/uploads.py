@@ -15,7 +15,12 @@ from sqlalchemy import text
 from app.bot import texts
 from app.db.models import Business
 from app.db.repositories import UserRepo
-from app.ingestion.knowledge import MATERIAL_EXTENSIONS
+from app.ingestion.profile_files import (
+    FORMAT_ERROR,
+    PROFILE_FILE_EXTENSIONS,
+    ProfileFileFormatError,
+    validate_profile_file,
+)
 from app.services.accounts import is_admin
 from app.services.document_uploads import (
     PROFILE_DOCUMENT_BYTES,
@@ -86,11 +91,11 @@ class UploadServer:
         if (
             len(filename) > 255
             or any(ord(c) < 32 for c in filename)
-            or suffix not in MATERIAL_EXTENSIONS
+            or suffix not in PROFILE_FILE_EXTENSIONS
         ):
             return response(
                 415,
-                "Для визуалов используйте PDF, PNG, JPG или WebP. Текст: DOCX, TXT, MD, CSV, JSON, RTF.",
+                FORMAT_ERROR,
             )
         if self.active_uploads >= 2:
             return response(503, "Сервер занят. Запросите новую ссылку в боте через минуту.")
@@ -144,11 +149,14 @@ class UploadServer:
                 user = await UserRepo(session).get(grant.user_id)
                 user_telegram_id = user.telegram_id
                 try:
+                    await asyncio.to_thread(validate_profile_file, filename, path)
                     await save_document(
                         session, company, filename, path, storage=self.container.storage
                     )
                 except DocumentQuotaError:
                     return response(413, "Файл превышает остаток лимита профиля в 100 МБ.")
+                except ProfileFileFormatError as exc:
+                    return response(415, str(exc))
         if self.container.notifier is not None:
             try:
                 async with asyncio.timeout(5):

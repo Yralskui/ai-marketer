@@ -68,7 +68,7 @@ function icon(name) {
     image.setAttribute("class", "icon");
     image.setAttribute("aria-hidden", "true");
     const shape = document.createElementNS(namespace, "use");
-    shape.setAttribute("href", "/miniapp/icons.svg?v=apple-layout-3#" + name);
+    shape.setAttribute("href", "#" + name);
     image.append(shape);
     return image;
 }
@@ -1397,9 +1397,15 @@ function profile(company) {
 
 const profileFields = {
     name:"Название", description:"Описание компании", products:"Продукты и услуги",
-    audience:"Аудитория", usp:"Что отличает компанию", tone:"Тон общения",
+    audience:"Аудитория", usp:"Что отличает компанию",
     visual_style:"Визуальный стиль", restrictions:"Ограничения", website:"Сайт компании", channel:"Telegram-канал",
 };
+
+const profileImageExtensions = new Set(
+    "png apng jpg jpeg jfif webp gif bmp dib tif tiff heic heif avif ico icns jp2 j2k jpf jpx ppm pgm pbm pnm tga qoi psd svg".split(" ")
+);
+const profileFileLimit = 100_000_000;
+const fileExtension = name => name.includes(".") ? name.split(".").at(-1).toLowerCase() : "";
 
 const fileSymbols = {
     image:"M3 3h18v18H3z M8 9h.01 M3 17l5-5 4 4 3-3 6 6",
@@ -1420,8 +1426,8 @@ async function confirmDocumentRemoval(name) {
 function fileTile(item, company, remove) {
     const tile = el("figure",undefined,"profile-file");
     const square = el("div",undefined,"profile-file-square");
-    const suffix = item.name.split(".").at(-1).toLowerCase();
-    const isImage = ["jpg","jpeg","png","webp"].includes(suffix);
+    const suffix = fileExtension(item.name);
+    const isImage = profileImageExtensions.has(suffix);
     const kind = isImage ? "image" : suffix === "pdf" ? "pdf" : "text";
     square.dataset.kind = kind;
     square.append(chatIcon(fileSymbols[kind]));
@@ -1470,6 +1476,15 @@ function profileForm(company) {
     const pending = new Map();
     let savedCompany = company?.id;
     let savedWebsite = company?.website || "";
+    let available = company ? (state.document_bytes_available ?? profileFileLimit) : profileFileLimit;
+    const fileError = el("p",undefined,"sheet-error");
+    fileError.setAttribute("role","alert");
+    fileError.hidden = true;
+    const pendingBytes = () => [...pending.keys()].reduce((total,file) => total + file.size,0);
+    function showFileError(message) {
+        fileError.textContent = message;
+        fileError.hidden = !message;
+    }
     for (const [key, label] of Object.entries(profileFields)) {
         const field = el("label",label + (key === "name" ? " *" : ""));
         const input = el(["description","visual_style"].includes(key) ? "textarea" : "input");
@@ -1496,14 +1511,17 @@ function profileForm(company) {
             if (item.file) pending.delete(item.file);
             else {
                 await api("document","POST",{company:savedCompany,id:item.id,action:"delete"});
+                available += item.size || 0;
                 if (state.active === savedCompany) {
                     state.documents = state.documents.filter(document => document.id !== item.id);
+                    state.document_bytes_available = available;
                 }
                 const key = savedCompany + ":" + item.id;
                 documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
                 documentPreviews.delete(key);
             }
             tile.remove();
+            showFileError("");
         });
         grid.append(tile);
         return tile;
@@ -1514,13 +1532,25 @@ function profileForm(company) {
     picker.type = "file";
     picker.multiple = true;
     picker.hidden = true;
-    picker.accept = ".pdf,.png,.jpg,.jpeg,.webp,.docx,.txt,.md,.csv,.json,.rtf";
+    picker.accept = ["image/*",".pdf",...[...profileImageExtensions].map(suffix => "." + suffix)].join(",");
     picker.addEventListener("change",() => {
-        for (const file of picker.files) pending.set(file,addTile({name:file.name,file}));
+        const files = [...picker.files];
         picker.value = "";
+        if (!files.length) return;
+        if (files.some(file => fileExtension(file.name) !== "pdf" && !profileImageExtensions.has(fileExtension(file.name)))) {
+            showFileError("Принимаются изображения и PDF. Презентации экспортируйте в PDF.");
+            return;
+        }
+        if (files.some(file => !file.size) ||
+            pendingBytes() + files.reduce((total,file) => total + file.size,0) > available) {
+            showFileError("Файлы должны быть непустыми и укладываться в общий лимит профиля 100 МБ.");
+            return;
+        }
+        showFileError("");
+        for (const file of files) pending.set(file,addTile({name:file.name,file}));
     });
     const add = button("Добавить файлы +",() => picker.click(),"profile-add-files");
-    form.append(el("h3","Файлы профиля"),grid,picker,add);
+    form.append(el("h3","Файлы профиля"),el("p","Изображения и PDF · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
     const submit = el("button","Сохранить профиль","primary");
     form.append(submit);
     form.addEventListener("submit", event => {
@@ -1530,7 +1560,7 @@ function profileForm(company) {
             const url = website.trim();
             if ((pending.size || url) && !state.storage) throw new Error("Хранилище материалов не подключено.");
             for (const file of pending.keys()) {
-                if (!file.size || file.size > 100_000_000) throw new Error("Файл должен быть от 1 байта до 100 МБ.");
+                if (!file.size || file.size > profileFileLimit) throw new Error("Файл должен быть от 1 байта до 100 МБ.");
             }
             if (savedCompany) data.company = savedCompany;
             const saved = await api(savedCompany ? "profile" : "profiles",savedCompany ? "PATCH" : "POST",data);
@@ -1538,6 +1568,7 @@ function profileForm(company) {
             for (const [file,tile] of pending) {
                 await api("document?company=" + savedCompany,"PUT",file);
                 pending.delete(file);
+                available -= file.size;
                 tile.querySelector(".profile-file-remove").remove();
             }
             if (url !== savedWebsite) {

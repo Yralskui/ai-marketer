@@ -1,8 +1,11 @@
 """Краткая веб-справка и один разбор на опубликованный пост."""
 
 import json
+import re
+from collections.abc import Callable
 from datetime import timedelta
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -12,9 +15,59 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.agent.prompts import render_prompt
 from app.db.models import Post, PostStatus
 from app.db.publications import PostCritique, PostSnapshot
-from app.llm.base import LLMError
+from app.llm.base import LLMError, LLMProvider
 from app.services.business_profile import get_profile
 from app.utils.time import to_local, utcnow
+
+EXTERNAL_FACTS = re.compile(
+    r"\b(?:закон(?:а|е|ы|ов|ом|одатель\w*)?|законопроект\w*|правов\w*|"
+    r"гост(?:ы|а|у|ом)?|норматив\w*|новост\w*|исследовани\w*|научн\w*|"
+    r"уч[её]ны\w*|метаанализ\w*|статистик\w*|вступил\w*\s+в\s+силу|"
+    r"фактчек\w*|проверь\s+факт\w*|"
+    r"по\s+(?:последним|свежим)\s+данным)\b",
+    re.IGNORECASE,
+)
+
+
+class UnverifiedPostFacts(ValueError):
+    """Нужный внешний факт пока не подтверждён."""
+
+
+async def verified_post_context(
+    llm: LLMProvider | None,
+    tz: ZoneInfo,
+    topic: str,
+    *,
+    question: str = "",
+    scientific: bool = False,
+    instruction: str = "",
+    progress: Callable[[str], None] | None = None,
+) -> str:
+    if not (
+        question or scientific or EXTERNAL_FACTS.search(topic) or EXTERNAL_FACTS.search(instruction)
+    ):
+        return ""
+    question = question or (
+        "Проверь центральные факты, терминологию и оговорки для публикации"
+        + (
+            f". Уточнение задачи: {instruction[:240]}"
+            if instruction
+            else f" по теме: {topic[:280]}"
+        )
+    )
+    if progress is not None:
+        progress("search")
+    try:
+        brief = await research(llm, tz, topic, question)
+    except LLMError as exc:
+        raise UnverifiedPostFacts(
+            "Поиск сейчас недоступен. Повторите запрос или пришлите источник для проверки."
+        ) from exc
+    if not brief or not brief["summary"] or not brief["sources"]:
+        raise UnverifiedPostFacts(
+            "Не нашёл подтверждения для этого поста. Пришлите ссылку на источник или уточните факт."
+        )
+    return brief_context(brief)
 
 
 class Critique(BaseModel):
@@ -44,6 +97,8 @@ async def research(llm, tz, topic, question):
     try:
         data = json.loads(raw)
         summary = str(data["summary"]).strip()[:850]
+        if summary.startswith("NO_EVIDENCE"):
+            return {"summary": "", "sources": []}
         sources = []
         for url, title in data["sources"]:
             if len(url) <= 1500 and urlsplit(url).scheme in {"https", "http"}:

@@ -21,6 +21,8 @@ class CreatePostArgs(BaseModel):
         "telegram", description="Площадка; сейчас публикация работает только в telegram"
     )
     with_image: bool = Field(False, description="Нужна ли картинка к посту")
+    style: posts.PostStyle = Field(posts.PostStyle.NEUTRAL, description="Стиль поста")
+    image_direction: str = Field("", max_length=500, description="Конкретный замысел иллюстрации")
 
 
 @tool(
@@ -42,6 +44,8 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
         image_model=ctx.settings.image_model,
         progress=ctx.update_progress,
+        style=args.style,
+        image_direction=args.image_direction,
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
     ctx.created_post_ids.append(post.id)
@@ -59,6 +63,7 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
 class RevisePostArgs(BaseModel):
     post_id: int = Field(description="Номер поста")
     instruction: str = Field(description="Что изменить, словами клиента", min_length=2)
+    style: posts.PostStyle | None = Field(None, description="Новый стиль при явной просьбе")
     research_question: str = Field(
         "",
         max_length=400,
@@ -81,6 +86,7 @@ async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
         post,
         args.instruction,
         web_context=ctx.web_context,
+        style=args.style,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)

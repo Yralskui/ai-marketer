@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Literal
 
 from openai import AsyncOpenAI
-from PIL import Image
 from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
 
@@ -16,10 +15,8 @@ from app.agent.prompts import render_prompt
 from app.config import Settings
 from app.db.knowledge import EMBEDDING_DIMENSIONS
 from app.ingestion.documents import extract_text
+from app.ingestion.profile_files import IMAGE_EXTENSIONS, render_profile_image
 
-VISUAL_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
-TEXT_EXTENSIONS = {".docx", ".txt", ".md", ".csv", ".json", ".rtf"}
-MATERIAL_EXTENSIONS = VISUAL_EXTENSIONS | TEXT_EXTENSIONS
 PAGE_BATCH = 6
 MAX_PAGES = 180
 MAX_TEXT = 2_000_000
@@ -60,16 +57,6 @@ def pdf_parts(path: Path, output: Path):
         for first in range(0, len(reader.pages), PAGE_BATCH)
         for part in split(first, min(first + PAGE_BATCH, len(reader.pages)))
     ]
-
-
-def image_for_model(path: Path) -> bytes:
-    from io import BytesIO
-
-    with Image.open(path) as source:
-        source.thumbnail((2400, 2400))
-        buffer = BytesIO()
-        source.convert("RGB").save(buffer, "JPEG", quality=91)
-        return buffer.getvalue()
 
 
 def text_parts(path: Path) -> list[str]:
@@ -117,8 +104,8 @@ class KnowledgeModels:
                     )
                 )
             return results
-        if suffix in VISUAL_EXTENSIONS:
-            content = await asyncio.to_thread(image_for_model, path)
+        if suffix in IMAGE_EXTENSIONS:
+            content = await asyncio.to_thread(render_profile_image, path, suffix, 2400, "JPEG")
             return await self._summarize(
                 system,
                 "Визуальный референс",

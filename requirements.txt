@@ -16,7 +16,10 @@ python-docx>=1.1
 trafilatura>=1.12
 beautifulsoup4>=4.12
 dateparser>=1.2
-Pillow>=10.3
+Pillow>=11.3
+pillow-heif>=1.0,<2
+resvg-py>=0.5,<0.6
+defusedxml>=0.7,<1
 # Таблица часовых поясов для zoneinfo — обязательна на Windows
 tzdata>=2024.1
 asyncpg>=0.30,<1

@@ -87,6 +87,7 @@ async def create_post_with_photo(
     topic: str,
     *,
     source: RevisionSource | None = None,
+    web_context: str = "",
 ) -> Post:
     """Новый черновик: текст пишет AI, картинка — фото клиента."""
     topic = topic.strip() or media.caption.strip() or "новый пост с нашим фото"
@@ -101,6 +102,7 @@ async def create_post_with_photo(
         image_path=media.path,
         media_id=media.id,
         source=source or RevisionSource("photo", request_text=topic),
+        web_context=web_context,
     )
     media.used_count += 1
     await session.flush()

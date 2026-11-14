@@ -14,7 +14,7 @@ from app.agent.tools import analytics_tools, plan_tools, post_tools
 from app.db.models import MessageRole, PostStatus
 from app.db.repositories import PostRepo
 from app.db.repositories.agent_message import AgentMessageRepo
-from app.services import editorial
+from app.services import editorial, posts
 from app.services.business_profile import profile_to_text
 from app.services.knowledge_search import retrieve
 from app.utils.time import parse_schedule_time
@@ -39,11 +39,18 @@ class Intent(BaseModel):
 
 
 class DraftRequest(post_tools.CreatePostArgs):
+    topic: str = Field("", max_length=1000, description="Конкретная тема поста")
+    clarification: str = Field(
+        "", max_length=400, description="Один вопрос, если без ответа нельзя написать пост"
+    )
+    suggestion: str = Field(
+        "", max_length=400, description="Конкретный ракурс или идея, если уместно"
+    )
     when: str = Field("", max_length=200, description="Желаемая дата публикации из запроса")
     research_question: str = Field(
         "",
         max_length=400,
-        description="Точный вопрос для поиска, только если нужны актуальные внешние факты",
+        description="Точный вопрос для проверки новости, закона, науки или другого внешнего факта",
     )
 
 
@@ -87,7 +94,11 @@ SCENARIOS = {
 async def answer(ctx: AgentContext, text: str, *, history_limit: int = 6) -> dict:
     revision = re.fullmatch(r"Правка поста №(\d+)\s*:\s*(.{2,2000})", text.strip(), re.S)
     if revision:
-        args = post_tools.RevisePostArgs(post_id=int(revision[1]), instruction=revision[2])
+        post_id, instruction = int(revision[1]), revision[2]
+        args = await scenario_args(ctx, post_tools.RevisePostArgs, "revise_post", text, "")
+        args = (
+            args or post_tools.RevisePostArgs(post_id=post_id, instruction=instruction)
+        ).model_copy(update={"post_id": post_id, "instruction": instruction})
         return await run_scenario(ctx, "revise_post", text, "", args=args)
     explicit = re.fullmatch(
         r"(?:разбери|проанализируй)\s+пост\s*[№#]?\s*(\d+)[.!]?", text.strip(), re.I
@@ -191,12 +202,21 @@ async def critique_reply(ctx, post_id):
 
 
 async def scenario_args(ctx, schema, intent, text, history):
-    raw = await ctx.llm.complete(
+    prompt = (
         render_prompt(
+            "post_brief",
+            profile=profile_to_text(ctx.business)[:4000],
+            schema=json.dumps(schema.model_json_schema(), ensure_ascii=False),
+        )
+        if intent == "create_post"
+        else render_prompt(
             "scenario_args",
             intent=intent,
             schema=json.dumps(schema.model_json_schema(), ensure_ascii=False),
-        ),
+        )
+    )
+    raw = await ctx.llm.complete(
+        prompt,
         request_with_history(text, history),
         json_mode=True,
         task=f"args_{intent}",
@@ -215,6 +235,13 @@ async def run_scenario(
         args = await scenario_args(ctx, schema, intent, text, history)
     if args is None:
         return {"text": await remember(ctx, text, clarify)}
+    if isinstance(args, DraftRequest) and (
+        args.clarification.strip() or len(args.topic.strip()) < 2
+    ):
+        reply = args.clarification.strip() or clarify
+        if args.suggestion.strip():
+            reply += "\n\n" + args.suggestion.strip()
+        return {"text": await remember(ctx, text, reply)}
     if isinstance(args, DraftRequest) and args.platform != "telegram":
         reply = "Сейчас доступна публикация в Telegram. Могу подготовить черновик для Telegram."
         return {"text": await remember(ctx, text, reply)}
@@ -229,14 +256,21 @@ async def run_scenario(
         if post is None or post.status in {PostStatus.PUBLISHED, PostStatus.REJECTED}:
             return {"text": await remember(ctx, text, "Этот пост недоступен для правок.")}
     if intent in {"create_post", "revise_post"}:
-        ctx.web_context = ""
-        if args.research_question.strip():
-            topic = args.topic if isinstance(args, DraftRequest) else post.topic
-            ctx.update_progress("search")
-            brief = await editorial.research(
-                ctx.research_llm, ctx.settings.tz, topic, args.research_question
+        style = args.style
+        if intent == "revise_post" and style is None:
+            style = await posts.post_style(ctx.session, post.id)
+        try:
+            ctx.web_context = await editorial.verified_post_context(
+                ctx.research_llm,
+                ctx.settings.tz,
+                args.topic if isinstance(args, DraftRequest) else post.topic,
+                question=args.research_question.strip(),
+                scientific=style == posts.PostStyle.SCIENTIFIC,
+                instruction=args.instruction if intent == "revise_post" else text,
+                progress=ctx.update_progress,
             )
-            ctx.web_context = editorial.brief_context(brief)
+        except editorial.UnverifiedPostFacts as exc:
+            return {"text": await remember(ctx, text, str(exc))}
     if intent in {"create_post", "plan"}:
         query = args.topic if isinstance(args, DraftRequest) else text
         ctx.reference = await retrieve(ctx.session, ctx.settings, ctx.business_id, query)
@@ -256,6 +290,8 @@ async def run_scenario(
         reply = f"Черновик №{result['post_id']} готов и ждёт согласования."
         if result.get("warning"):
             reply += " " + result["warning"]
+        if isinstance(args, DraftRequest) and args.suggestion.strip():
+            reply += "\n\n" + args.suggestion.strip()
         if when is not None:
             return await propose_draft_schedule(ctx, text, reply, result["post_id"], when)
         return {

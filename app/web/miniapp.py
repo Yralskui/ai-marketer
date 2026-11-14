@@ -16,12 +16,14 @@ from time import monotonic
 from typing import TYPE_CHECKING
 from urllib.parse import unquote
 from uuid import UUID, uuid4
+from xml.etree.ElementTree import ParseError
 
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 from botocore.exceptions import BotoCoreError, ClientError
-from PIL import Image, ImageOps, UnidentifiedImageError
+from defusedxml.common import DefusedXmlException
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, text, update
 
 from app.agent.context import AgentContext
@@ -67,7 +69,14 @@ from app.db.repositories import (
     UserRepo,
 )
 from app.db.repositories.agent_message import AgentMessageRepo
-from app.ingestion.knowledge import MATERIAL_EXTENSIONS
+from app.ingestion.profile_files import (
+    FORMAT_ERROR,
+    IMAGE_EXTENSIONS,
+    PROFILE_FILE_EXTENSIONS,
+    ProfileFileFormatError,
+    render_profile_image,
+    validate_profile_file,
+)
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, pages_to_text
 from app.llm.base import LLMError
 from app.publishers.telegram_text import format_text
@@ -84,7 +93,12 @@ from app.services import (
     reports,
     social_metrics,
 )
-from app.services.document_uploads import DocumentQuotaError, save_document, stage_document
+from app.services.document_uploads import (
+    DocumentQuotaError,
+    remaining_bytes,
+    save_document,
+    stage_document,
+)
 from app.services.post_history import RevisionSource, save_revision
 from app.services.usage import BudgetExceededError, get_budget, month_spend, set_budget, usage_scope
 from app.utils.time import format_local, to_local, to_utc_naive, utcnow
@@ -99,7 +113,6 @@ DEFAULT_PROFILE_NAME = "Салават Стекло"
 ASSETS = Path(__file__).parent / "miniapp"
 POST_LIMIT = 75
 DOCUMENT_PREVIEW_MAX_BYTES = 12_000_000
-DOCUMENT_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 SECURITY = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
@@ -117,18 +130,8 @@ def json_response(data, status: int = 200) -> web.Response:
 def has_document_preview(document: ProfileDocument) -> bool:
     return (
         document.size <= DOCUMENT_PREVIEW_MAX_BYTES
-        and Path(document.filename).suffix.lower() in DOCUMENT_IMAGE_SUFFIXES
+        and Path(document.filename).suffix.lower() in IMAGE_EXTENSIONS
     )
-
-
-def document_thumbnail(path: Path) -> bytes:
-    with Image.open(path, formats=("JPEG", "PNG", "WEBP")) as image:
-        if image.width * image.height > 25_000_000:
-            raise ValueError("Изображение слишком большое для предпросмотра")
-        image.thumbnail((320, 320))
-        with BytesIO() as output:
-            ImageOps.exif_transpose(image).convert("RGB").save(output, "WEBP", quality=78)
-            return output.getvalue()
 
 
 class MiniApp:
@@ -147,9 +150,16 @@ class MiniApp:
             self.api,
         )
 
-    async def asset(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(
-            ASSETS / request.match_info.get("asset", "index.html"), headers=SECURITY
+    async def asset(self, request: web.Request) -> web.StreamResponse:
+        asset = request.match_info.get("asset")
+        if asset:
+            return web.FileResponse(ASSETS / asset, headers=SECURITY)
+        page = (ASSETS / "index.html").read_text(encoding="utf-8")
+        icons = (ASSETS / "icons.svg").read_text(encoding="utf-8")
+        return web.Response(
+            text=page.replace("<!-- miniapp-icons -->", icons),
+            content_type="text/html",
+            headers=SECURITY,
         )
 
     async def api(self, request: web.Request) -> web.Response:
@@ -788,7 +798,13 @@ class MiniApp:
                 with TemporaryDirectory(prefix="marketer-preview-") as tmp:
                     path = Path(tmp) / "image"
                     await storage.download(document.original_key, path)
-                    preview = await asyncio.to_thread(document_thumbnail, path)
+                    preview = await asyncio.to_thread(
+                        render_profile_image,
+                        path,
+                        Path(document.filename).suffix.lower(),
+                        320,
+                        "WEBP",
+                    )
         except (
             BotoCoreError,
             ClientError,
@@ -796,6 +812,8 @@ class MiniApp:
             TimeoutError,
             Image.DecompressionBombError,
             ValueError,
+            ParseError,
+            DefusedXmlException,
         ):
             return json_response({"error": "Предпросмотр недоступен"}, 404)
         return web.Response(body=preview, content_type="image/webp", headers=SECURITY)
@@ -1206,6 +1224,9 @@ class MiniApp:
         if not 0 < len(topic) <= 512:
             raise ValueError("Укажите тему до 512 символов")
         async with usage_scope(session, company.id):
+            web_context = await editorial.verified_post_context(
+                self.container.research_llm, self.container.settings.tz, topic
+            )
             post = await media.create_post_with_photo(
                 session,
                 self.container.llm,
@@ -1214,6 +1235,7 @@ class MiniApp:
                 photo,
                 topic,
                 source=RevisionSource("photo", author_id=user.id, request_text=topic),
+                web_context=web_context,
             )
             await approval.submit_for_approval(session, post, None, None)
         return json_response({"id": post.id})
@@ -1434,6 +1456,9 @@ class MiniApp:
                 "history": history,
                 "chat_posts": chat_posts,
                 "documents": materials,
+                "document_bytes_available": await remaining_bytes(session, active.id)
+                if active
+                else None,
                 "storage": self.container.storage is not None,
                 "stories": self.stories(),
                 "dashboard": dashboard,
@@ -1548,7 +1573,7 @@ class MiniApp:
         fields = {
             key: str(value)[:2000]
             for key, value in data.items()
-            if key in business_profile.PROFILE_FIELD_TITLES
+            if key in business_profile.PROFILE_FIELD_TITLES and key != "tone"
         }
         if (company.settings or {}).get("miniapp_default"):
             fields.pop("name", None)
@@ -1616,12 +1641,10 @@ class MiniApp:
         if (
             len(name) > 255
             or any(ord(c) < 32 for c in name)
-            or Path(name).suffix.lower() not in MATERIAL_EXTENSIONS
+            or Path(name).suffix.lower() not in PROFILE_FILE_EXTENSIONS
         ):
             return json_response(
-                {
-                    "error": "Для визуалов используйте PDF, PNG, JPG или WebP. Презентации экспортируйте в PDF."
-                },
+                {"error": FORMAT_ERROR},
                 415,
             )
         if self.active_uploads >= 2:
@@ -1637,7 +1660,10 @@ class MiniApp:
                             if count > PROFILE_DOCUMENT_BYTES:
                                 return json_response({"error": "Файл превышает 100 МБ"}, 413)
                             file.write(block)
+                await asyncio.to_thread(validate_profile_file, name, path)
                 await save_document(session, company, name, path, storage=self.container.storage)
+        except ProfileFileFormatError as exc:
+            return json_response({"error": str(exc)}, 415)
         except DocumentQuotaError:
             return json_response({"error": "Файл не помещается в общую квоту 100 МБ"}, 413)
         except TimeoutError:
@@ -1836,12 +1862,21 @@ class MiniApp:
                 instruction = str(data["instruction"]).strip()
                 if not 0 < len(instruction) <= 2000:
                     raise ValueError("Введите правку")
+                style = await posts.post_style(session, post.id)
+                web_context = await editorial.verified_post_context(
+                    self.container.research_llm,
+                    self.container.settings.tz,
+                    post.topic,
+                    instruction=instruction,
+                    scientific=style == posts.PostStyle.SCIENTIFIC,
+                )
                 await posts.revise(
                     session,
                     self.container.llm,
                     company,
                     post,
                     instruction,
+                    web_context=web_context,
                     source=RevisionSource("manual", author_id=user.id, request_text=instruction),
                 )
                 await approval.submit_for_approval(session, post, None, None)

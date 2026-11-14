@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from html import escape
 from pathlib import Path
@@ -21,7 +22,11 @@ from app.bot.states import OnboardingStates
 from app.container import AppContainer
 from app.db.models import Business, SourceType, User
 from app.ingestion.documents import MAX_DOCUMENT_BYTES
-from app.ingestion.knowledge import MATERIAL_EXTENSIONS
+from app.ingestion.profile_files import (
+    PROFILE_FILE_EXTENSIONS,
+    ProfileFileFormatError,
+    validate_profile_file,
+)
 from app.ingestion.website import WebsiteFetchError, fetch_site_text, find_url, pages_to_text
 from app.llm.base import LLMError
 from app.services import business_profile
@@ -106,7 +111,7 @@ async def on_document(
     assert doc is not None
     filename = doc.file_name or "document"
     suffix = Path(filename).suffix.lower()
-    if suffix not in MATERIAL_EXTENSIONS:
+    if suffix not in PROFILE_FILE_EXTENSIONS:
         await message.answer(texts.UPLOAD_UNSUPPORTED)
         return
     if doc.file_size and doc.file_size > await remaining_bytes(session, business.id):
@@ -133,9 +138,13 @@ async def on_document(
                 await message.answer(texts.UPLOAD_EMPTY)
                 return
             try:
+                await asyncio.to_thread(validate_profile_file, filename, path)
                 await save_document(session, business, filename, path, storage=container.storage)
             except DocumentQuotaError:
                 await message.answer(texts.UPLOAD_QUOTA)
+                return
+            except ProfileFileFormatError:
+                await message.answer(texts.UPLOAD_UNSUPPORTED)
                 return
     await message.answer(
         texts.ONBOARDING_DOC_SAVED.format(name=escape(filename), size=size),

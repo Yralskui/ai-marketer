@@ -31,6 +31,15 @@ class PlanOrigin(Base):
     request_id: Mapped[int] = mapped_column(ForeignKey("agent_messages.id"))
 
 
+class PostEditorialSettings(Base):
+    __tablename__ = "post_editorial_settings"
+
+    post_id: Mapped[int] = mapped_column(
+        ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True
+    )
+    style: Mapped[str] = mapped_column(String(20))
+
+
 class RevisionDecision(Base):
     __tablename__ = "revision_decisions"
 

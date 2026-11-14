@@ -20,7 +20,7 @@ from app.db.models import Business, ContentPlanItemStatus, PostStatus
 from app.db.publications import PlanOrigin
 from app.db.repositories import BusinessRepo, PostRepo, UserRepo
 from app.llm.base import LLMProvider
-from app.services import approval, content_plan, posts, reports, social_metrics
+from app.services import approval, content_plan, editorial, posts, reports, social_metrics
 from app.services.business_profile import get_profile, profile_to_text
 from app.services.knowledge_search import retrieve
 from app.services.notifier import Notifier
@@ -129,6 +129,9 @@ async def generate_daily_drafts(
                     ):
                         continue
                     reference = await retrieve(session, container.settings, business.id, topic)
+                    web_context = await editorial.verified_post_context(
+                        container.research_llm, container.settings.tz, topic
+                    )
                     post = await posts.create_draft(
                         session,
                         container.llm,
@@ -137,6 +140,7 @@ async def generate_daily_drafts(
                         topic,
                         with_image=True,
                         reference=reference,
+                        web_context=web_context,
                         source=RevisionSource("scheduler"),
                         image_model=container.settings.image_model,
                     )
@@ -172,6 +176,9 @@ async def prepare_plan_drafts(container: AppContainer, now: datetime | None = No
                 chat_id = await _owner_chat_id(session, business.id)
                 async with usage_scope(session, business.id):
                     reference = await retrieve(session, container.settings, business.id, item.topic)
+                    web_context = await editorial.verified_post_context(
+                        container.research_llm, container.settings.tz, item.topic
+                    )
                     origin = await session.get(PlanOrigin, plan.id)
                     post = await posts.create_draft(
                         session,
@@ -186,6 +193,7 @@ async def prepare_plan_drafts(container: AppContainer, now: datetime | None = No
                             "plan", request_id=origin.request_id if origin else None
                         ),
                         reference=reference,
+                        web_context=web_context,
                         image_model=container.settings.image_model,
                     )
                     item.status = ContentPlanItemStatus.DRAFTED
