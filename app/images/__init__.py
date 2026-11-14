@@ -3,3 +3,7 @@
 
 class ImageGenerationError(RuntimeError):
     """Провайдер не смог вернуть готовое изображение."""
+
+
+class ImageGenerationTimeout(ImageGenerationError):
+    """Ожидание генерации превысило лимит приложения."""

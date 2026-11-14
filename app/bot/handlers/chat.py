@@ -5,12 +5,12 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import AgentContext
-from app.agent.harness import answer
+from app.agent.harness import answer, choose_draft_option
 from app.bot.keyboards import miniapp_keyboard
 from app.container import AppContainer
 from app.db.knowledge import MiniUserState, PendingPostAction
@@ -81,6 +81,8 @@ async def on_text(
         container.images,
         chat_id=message.chat.id,
         research_llm=container.research_llm,
+        interactive_drafts=True,
+        storage=container.storage,
     )
     try:
         async with (
@@ -98,24 +100,92 @@ async def on_text(
         return
     if turns is not None:
         await state.update_data(turns_since_reset=turns + 1)
+    await send_result(message, session, ctx, container, result, selection)
+
+
+@router.callback_query(F.data.regexp(r"^draftopt:[0-9]+:[0-9a-f]{12}:[a-z_]{1,12}$"))
+async def on_draft_option(
+    callback: CallbackQuery, session: AsyncSession, db_user: User, container: AppContainer, bot: Bot
+) -> None:
+    message = callback.message
+    if not isinstance(message, Message) or message.chat.type != ChatType.PRIVATE:
+        await callback.answer()
+        return
+    _, profile_id, token, choice = callback.data.split(":")
+    business = next(
+        (
+            profile
+            for profile in await accessible_profiles(session, db_user)
+            if profile.id == int(profile_id)
+        ),
+        None,
+    )
+    if business is None:
+        await callback.answer("Профиль недоступен.", show_alert=True)
+        return
+    await callback.answer()
+    ctx = AgentContext(
+        session,
+        db_user,
+        business,
+        container.settings,
+        container.llm,
+        container.images,
+        research_llm=container.research_llm,
+        chat_id=message.chat.id,
+        interactive_drafts=True,
+        storage=container.storage,
+    )
+    try:
+        async with (
+            ChatActionSender.typing(bot=bot, chat_id=message.chat.id),
+            usage_scope(session, business.id),
+        ):
+            result = await choose_draft_option(ctx, token, choice)
+    except (BudgetExceededError, ValueError) as exc:
+        await message.answer(escape(str(exc)))
+        return
+    except LLMError:
+        await message.answer("ИИ временно недоступен. Попробуйте ещё раз.")
+        return
+    await session.commit()
+    await message.edit_reply_markup(reply_markup=None)
+    selection = await session.get(MiniUserState, db_user.id)
+    await send_result(message, session, ctx, container, result, selection)
+
+
+async def send_result(message, session, ctx, container, result, selection):
     reply = escape(result["text"])
+    if question := result.get("draft_options"):
+        await session.commit()
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=option["label"],
+                    callback_data=f"draftopt:{ctx.business_id}:{question['token']}:{option['id']}",
+                )
+            ]
+            for option in question["options"]
+        ]
+        await message.answer(reply, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        return
     if proposal := result.get("proposal"):
         await session.merge(
             PendingPostAction(
-                user_id=db_user.id,
-                business_id=business.id,
+                user_id=ctx.user_id,
+                business_id=ctx.business_id,
                 proposal=proposal,
             )
         )
         await session.commit()
     if result.get("proposal") or ctx.created_post_ids:
         instructions = "\nПроверьте действие в Mini App."
-        if selection is None or selection.selected_id != business.id:
+        if selection is None or selection.selected_id != ctx.business_id:
             instructions = "\nВ Mini App выберите эту компанию и откройте «Главная»."
         await open_app(
             message,
             container,
-            escape(business.name) + "\n" + reply + instructions,
+            escape(ctx.business.name) + "\n" + reply + instructions,
         )
     else:
         await message.answer(reply)

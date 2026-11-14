@@ -34,7 +34,6 @@ let tab = "profile";
 let initial = true;
 let sending = false;
 let pendingChat;
-let chatDraft;
 const readCache = new Map();
 const readRequests = new Map();
 const critiqueResults = new Map();
@@ -141,8 +140,8 @@ async function api(path, method = "GET", data, signal) {
     const response = await fetch("/miniapp/api/" + path, {
         method, headers, body, signal: signal || AbortSignal.timeout(method === "PUT" ? 150000 : 240000),
     });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "Сервис недоступен. Попробуйте ещё раз.");
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result) throw new Error(result?.error || "Сервис недоступен. Попробуйте ещё раз.");
     if (method !== "GET") {
         cacheVersion++;
         readCache.clear();
@@ -711,15 +710,19 @@ function telegramPost(post, attachments = postMedia(post), remove = null) {
         group.dataset.count = attachments.length > 3 ? "many" : String(attachments.length);
         attachments.forEach((item, index) => {
             const cell = el("div", undefined, "tg-media-cell");
-            const media = el(item.type === "video" ? "video" : "img");
-            if (item.type === "video") {
-                media.controls = true;
-                media.playsInline = true;
-                media.preload = "metadata";
-                media.setAttribute("aria-label", item.name);
-            } else media.alt = item.name;
-            loadMedia(media, item);
-            cell.append(media);
+            if (item.type === "document") {
+                cell.append(el("p","PDF · " + item.name,"tg-document"));
+            } else {
+                const media = el(item.type === "video" ? "video" : "img");
+                if (item.type === "video") {
+                    media.controls = true;
+                    media.playsInline = true;
+                    media.preload = "metadata";
+                    media.setAttribute("aria-label", item.name);
+                } else media.alt = item.name;
+                loadMedia(media, item);
+                cell.append(media);
+            }
             if (remove) {
                 const cross = button("×", () => remove(index), "tg-media-remove");
                 cross.setAttribute("aria-label", "Убрать " + item.name);
@@ -774,6 +777,22 @@ function draftActions(post, options = {}) {
     actions.append(button("Отклонить",() => decide("reject"),"plain"),
         button("Редактировать",() => editPost(post,options.refresh),"plain"),
         button("Принять",() => decide("approve"),"primary"));
+    const pending = state.pending_files?.[post.id];
+    if (pending) {
+        const card = el("div",undefined,"company-file-confirm");
+        const decisions = el("div",undefined,"row");
+        const decideFile = async action => {
+            await api("post","POST",{company,id:post.id,version:post.version,action,document:pending.id});
+            await load();
+            if (options.refresh) options.refresh();
+        };
+        decisions.append(
+            button("Без файла",() => decideFile("decline_company_file"),"plain"),
+            button("Прикрепить",() => decideFile("attach_company_file"),"primary"),
+        );
+        card.append(el("p","Прикрепить «" + pending.name + "»?"),decisions);
+        actions.prepend(card);
+    }
     if (scheduled) {
         const hint = el("p","Публикация · " + historyTime(when),"draft-schedule-hint");
         actions.prepend(hint);
@@ -1497,11 +1516,11 @@ async function confirmDocumentRemoval(name) {
     return confirmFile.returnValue === "delete";
 }
 
-function fileTile(item, company, remove) {
+function fileTile(item, company, remove, sourceType = "document") {
     const tile = el("figure",undefined,"profile-file");
     const square = el("div",undefined,"profile-file-square");
     const suffix = fileExtension(item.name);
-    const isImage = profileImageExtensions.has(suffix);
+    const isImage = sourceType === "generated" || profileImageExtensions.has(suffix);
     const kind = isImage ? "image" : suffix === "pdf" ? "pdf" : "text";
     square.dataset.kind = kind;
     square.append(chatIcon(fileSymbols[kind]));
@@ -1519,10 +1538,10 @@ function fileTile(item, company, remove) {
             image.src = url;
             square.append(image);
         } else {
-            const key = company + ":" + item.id;
+            const key = sourceType + ":" + company + ":" + item.id;
             let source = documentPreviews.get(key);
             if (!source) {
-                source = fetch("/miniapp/api/document?" + new URLSearchParams({company,id:item.id}), {
+                source = fetch("/miniapp/api/" + sourceType + "?" + new URLSearchParams({company,id:item.id}), {
                     headers:{Authorization:"Telegram " + initData}, signal:AbortSignal.timeout(9000),
                 }).then(response => {
                     if (!response.ok) throw new Error("Предпросмотр недоступен");
@@ -1599,7 +1618,7 @@ function profileForm(company) {
                     state.documents = state.documents.filter(document => document.id !== item.id);
                     state.document_bytes_available = available;
                 }
-                const key = savedCompany + ":" + item.id;
+                const key = "document:" + savedCompany + ":" + item.id;
                 documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
                 documentPreviews.delete(key);
             }
@@ -1642,6 +1661,25 @@ function profileForm(company) {
     });
     const add = button("Добавить файлы +",() => picker.click(),"profile-add-files");
     form.append(el("h3","Файлы профиля"),el("p","PDF, Word, TXT, MD и до " + profileImageLimit + " картинок · до 100 МБ на профиль","muted"),grid,picker,add,fileError);
+    if (company) {
+        const generated = el("div",undefined,"profile-files");
+        const empty = el("p","Здесь будут изображения, которые ассистент сгенерирует для постов.","muted");
+        for (const item of state.generated || []) {
+            const tile = fileTile(item,savedCompany,async () => {
+                if (!await confirmDocumentRemoval(item.name)) return;
+                await api("generated","DELETE",{company:savedCompany,id:item.id});
+                state.generated = (state.generated || []).filter(entry => entry.id !== item.id);
+                const key = "generated:" + savedCompany + ":" + item.id;
+                documentPreviews.get(key)?.then(url => { if (url) URL.revokeObjectURL(url); });
+                documentPreviews.delete(key);
+                tile.remove();
+                empty.hidden = Boolean(generated.childElementCount);
+            },"generated");
+            generated.append(tile);
+        }
+        empty.hidden = Boolean(generated.childElementCount);
+        form.append(el("h3","Сгенерированный контент"),el("p","До 100 МБ","muted"),generated,empty);
+    }
     const submit = el("button","Сохранить профиль","primary");
     form.append(submit);
     form.addEventListener("submit", event => {
@@ -1679,20 +1717,27 @@ const chatStages = {
     critique:"Анализирую публикацию…",
 };
 
-async function watchChatProgress(job) {
+async function waitForChat(job) {
     const query = new URLSearchParams({company:job.company,id:job.id});
-    try {
-        const {stage} = await api("chat-progress?" + query,"GET",undefined,job.controller.signal);
-        if (chatStages[stage]) job.stage = stage;
-        const label = screen.querySelector(".chat-pending-label");
-        if (pendingChat === job && state.active === job.company && label) {
-            label.textContent = chatStages[job.stage];
+    const deadline = Date.now() + 8 * 60_000;
+    let failures = 0;
+    while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve,1000));
+        let status;
+        try {
+            status = await api("chat-progress?" + query,"GET",undefined,AbortSignal.timeout(5000));
+        } catch {
+            if (++failures < 12) continue;
+            break;
         }
-    } catch {
-        // The chat POST still returns the answer if progress is temporarily unavailable.
-    } finally {
-        if (!job.controller.signal.aborted) job.timer = setTimeout(() => watchChatProgress(job), 1000);
+        failures = 0;
+        if (status.result) return status.result;
+        if (!status.stage) throw new Error("Сервис перезапустился. Проверьте черновики перед повтором.");
+        if (chatStages[status.stage]) job.stage = status.stage;
+        const label = screen.querySelector(".chat-pending-label");
+        if (pendingChat === job && state.active === job.company && label) label.textContent = chatStages[job.stage];
     }
+    throw new Error("Не удалось получить ответ. Проверьте черновики перед повтором.");
 }
 
 function chat() {
@@ -1700,7 +1745,7 @@ function chat() {
     const log = chatLogs.get(company) || [];
     chatLogs.set(company, log);
     const messages = el("div", undefined, "messages");
-    if (!log.length) {
+    if (!log.length && !state.draft_question) {
         const empty = el("div", undefined, "chat-empty");
         const mark = el("span", undefined, "chat-mark");
         mark.append(chatIcon("M7.9 20A9 9 0 1 0 4 16.1L2 22Z M8 12h.01M12 12h.01M16 12h.01"));
@@ -1741,16 +1786,9 @@ function chat() {
                 continue;
             }
             const closeEditor = () => { if (sheet.open) sheet.close(); };
-            const reply = button("Попросить правку", () => {
-                chatDraft = {company,id:draft.id};
-                input.placeholder = "Что изменить в посте?";
-                reviseHint.hidden = false;
-                reviseHint.firstChild.textContent = "Правка поста №" + draft.id;
-                input.focus();
-            }, "text-button");
             bubble.append(telegramPost(draft),draftActions(draft,{
                 when:draftDates.get(draft.id) || message.proposal?.when,refresh:closeEditor,
-            }),reply);
+            }));
         } else if (message.proposal && !message.draft_id) bubble.append(button("Подтвердить", async () => {
             const result = await api("post", "POST", message.proposal);
             delete message.proposal;
@@ -1761,8 +1799,7 @@ function chat() {
     }
     const form = el("form", undefined, "composer");
     const input = el("input");
-    const editing = chatDraft?.company === company ? chatDraft : null;
-    input.placeholder = editing ? "Что изменить в посте?" : "Сообщение";
+    input.placeholder = "Сообщение";
     input.setAttribute("aria-label", "Сообщение боту");
     input.maxLength = 4000;
     input.required = true;
@@ -1770,48 +1807,60 @@ function chat() {
     send.setAttribute("aria-label", sending ? "Жду ответ…" : "Отправить");
     send.append(chatIcon("M12 19V5 M6 11l6-6 6 6"));
     send.disabled = sending;
-    const reviseHint = el("div",undefined,"chat-revise-hint");
-    const cancelRevision = button("",() => {
-        chatDraft = null;
-        input.placeholder = "Сообщение";
-        reviseHint.hidden = true;
-    },"icon-button");
-    cancelRevision.setAttribute("aria-label","Отменить правку");
-    cancelRevision.append(chatIcon("M6 6l12 12M18 6L6 18"));
-    reviseHint.append(el("span",editing ? "Правка поста №" + editing.id : ""),cancelRevision);
-    reviseHint.hidden = !editing;
-    form.append(reviseHint,input, send);
+    form.append(input, send);
     form.addEventListener("submit", (event) => {
         event.preventDefault();
-        if (sending || !input.value.trim()) return;
-        const instruction = input.value.trim();
-        const text = chatDraft?.company === company ? "Правка поста №" + chatDraft.id + ": " + instruction : instruction;
-        if (chatDraft?.company === company && (instruction.length < 2 || instruction.length > 2000)) {
-            feedback("Правка должна содержать от 2 до 2000 символов.");
-            return;
+        if (input.value.trim()) submit({text:input.value.trim()});
+    });
+    const question = state.draft_question;
+    if (question && !sending) {
+        const bubble = el("div",undefined,"bubble");
+        const choices = el("div",undefined,"row");
+        for (const option of question.draft_options.options) {
+            choices.append(button(option.label,() => submit({
+                draft_option:{token:question.draft_options.token,choice:option.id},
+            }),option.id === "cancel" ? "plain" : undefined));
         }
-        chatDraft = null;
-        const job = {company,id:crypto.randomUUID(),stage:"thinking",controller:new AbortController()};
+        bubble.append(el("p",question.text),choices);
+        messages.append(bubble);
+    }
+    async function submit(payload) {
+        if (sending) return;
+        const job = {company,id:crypto.randomUUID(),stage:"thinking"};
         pendingChat = job;
         sending = true;
-        log.push({text, me:true});
+        if (payload.text) log.push({text:payload.text, me:true});
         chat();
-        job.timer = setTimeout(() => watchChatProgress(job), 450);
-        guarded(send, async () => {
+        try {
+            const request = {company,...payload,id:job.id,background:true};
+            let result;
             try {
-                const result = await api("chat", "POST", {company,text,id:job.id});
-                if (!result.reload_history) log.push({text:result.text,proposal:result.proposal,draft_id:result.draft_id,draft_when:result.proposal?.when});
-                await load();
-                if (result.reload_history && state.active === company) chatLogs.set(company,state.history || []);
-            } finally {
-                job.controller.abort();
-                clearTimeout(job.timer);
-                pendingChat = undefined;
-                sending = false;
-                if (tab === "chat") chat();
+                result = await api("chat","POST",request,AbortSignal.timeout(10000));
+            } catch (error) {
+                if (!["TimeoutError","TypeError"].includes(error.name)) throw error;
+                result = await waitForChat(job);
             }
-        });
-    });
+            if (result.accepted) result = await waitForChat(job);
+            if (result.error) throw new Error(result.error);
+            if (!result.text?.trim()) throw new Error("Сервис вернул пустой ответ.");
+            if (!result.draft_options) log.push({text:result.text,proposal:result.proposal,draft_id:result.draft_id,draft_when:result.proposal?.when});
+            if (state.active === company && (result.draft_options || payload.draft_option)) {
+                state.draft_question = result.draft_options ? result : null;
+            }
+            try {
+                await load();
+                if (state.active === company && result.reload_history) chatLogs.set(company,state.history || []);
+            } catch {
+                feedback("Ответ получен. Не удалось обновить список черновиков.");
+            }
+        } catch (error) {
+            log.push({text:error.message || "Не удалось получить ответ. Проверьте черновики перед повтором."});
+        } finally {
+            pendingChat = undefined;
+            sending = false;
+            if (tab === "chat") chat();
+        }
+    }
     if (pendingChat?.company === company) {
         const pending = el("p", undefined, "chat-pending");
         pending.setAttribute("role", "status");
@@ -1822,7 +1871,7 @@ function chat() {
         messages.append(pending);
     }
     screen.replaceChildren(messages, form);
-    if (log.length) requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+    if (log.length || question) requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 }
 
 async function startApp() {

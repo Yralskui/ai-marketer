@@ -21,7 +21,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
+from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message
 
 from app.db.models import Channel, Platform, Post
 from app.publishers.base import ChannelCheck, Publisher, PublishError, PublishResult
@@ -83,19 +83,38 @@ class TelegramPublisher(Publisher):
                     raise PublishError("Подпись к медиа должна быть не длиннее 1024 символов")
                 if len(items) == 1:
                     item = items[0]
-                    send = self.bot.send_video if item["type"] == "video" else self.bot.send_photo
+                    send = getattr(
+                        self.bot,
+                        "send_"
+                        + {
+                            "video": "video",
+                            "document": "document",
+                        }.get(item["type"], "photo"),
+                    )
                     msg = await self._call(
                         lambda: send(
-                            chat_id, FSInputFile(item["path"]), caption=text, parse_mode=mode
+                            chat_id,
+                            FSInputFile(
+                                item["path"],
+                                filename=item["name"] if item["type"] == "document" else None,
+                            ),
+                            caption=text,
+                            parse_mode=mode,
                         )
                     )
                 else:
                     album = []
                     for index, item in enumerate(items):
-                        kind = InputMediaVideo if item["type"] == "video" else InputMediaPhoto
+                        kind = {
+                            "video": InputMediaVideo,
+                            "document": InputMediaDocument,
+                        }.get(item["type"], InputMediaPhoto)
                         album.append(
                             kind(
-                                media=FSInputFile(item["path"]),
+                                media=FSInputFile(
+                                    item["path"],
+                                    filename=item["name"] if item["type"] == "document" else None,
+                                ),
                                 caption=text if index == 0 else None,
                                 parse_mode=mode,
                             )

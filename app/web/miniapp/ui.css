@@ -327,6 +327,9 @@ dialog::backdrop { background: #1d1d1f61; }
 .tg-media[data-count="many"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .tg-media[data-count="2"] > *, .tg-media[data-count="many"] > * { aspect-ratio: 1; }
 .tg-media-cell { position: relative; min-height: 0; min-width: 0; }
+.tg-document { margin: 0; padding: 12px 34px 12px 12px; overflow-wrap: anywhere; }
+.company-file-confirm { grid-column: 1 / -1; padding: 8px 0; overflow-wrap: anywhere; }
+.company-file-confirm p { margin: 0 0 8px; }
 .tg-media-remove {
   position: absolute;
   z-index: 1;

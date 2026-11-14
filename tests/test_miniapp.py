@@ -26,6 +26,34 @@ def signed_user(user_id: int, *, age: int = 0) -> str:
     return urlencode({**payload, "hash": hmac.digest(secret, message.encode(), "sha256").hex()})
 
 
+async def create_chat_draft(client, headers, company, text, *, image="none"):
+    async def send(data):
+        async with client.post(
+            "/miniapp/api/chat", headers=headers, json={"company": company, **data}
+        ) as response:
+            assert response.status == 200
+            return await response.json()
+
+    async def choose(question, choice):
+        return await send(
+            {"draft_option": {"token": question["draft_options"]["token"], "choice": choice}}
+        )
+
+    question = await send({"text": text})
+    assert {option["id"] for option in question["draft_options"]["options"]} == {
+        "neutral",
+        "official",
+        "social",
+        "anti_llm",
+        "scientific",
+        "cancel",
+    }
+    async with client.get("/miniapp/api/state", headers=headers) as response:
+        assert (await response.json())["draft_question"] == question
+    question = await choose(question, "neutral")
+    return await choose(question, image)
+
+
 async def test_report_and_history_are_available_for_selected_company(settings, db):
     settings.bot_token = BOT_TOKEN
     settings.miniapp_open_signup = True
@@ -40,12 +68,7 @@ async def test_report_and_history_are_available_for_selected_company(settings, d
         base = "/miniapp/api/"
         response = await client.post(base + "profiles", headers=headers, json={"name": "Студия"})
         company = (await response.json())["id"]
-        response = await client.post(
-            base + "chat",
-            headers=headers,
-            json={"company": company, "text": "Напиши пост про стекло"},
-        )
-        assert response.status == 200
+        await create_chat_draft(client, headers, company, "Напиши пост про стекло")
         response = await client.get(base + "state", headers=headers)
         post = (await response.json())["posts"][0]
         response = await client.post(
@@ -96,16 +119,13 @@ async def test_accept_publishes_and_chat_revision_keeps_draft(settings, db):
         company = (await response.json())["active"]
         async with db.sessionmaker.begin() as session:
             await ChannelRepo(session).upsert(company, Platform.TELEGRAM, "@test_channel")
+        post_id = (await create_chat_draft(client, headers, company, "Напиши пост про стекло"))[
+            "draft_id"
+        ]
         response = await client.post(
             base + "chat",
             headers=headers,
-            json={"company": company, "text": "Напиши пост про стекло"},
-        )
-        post_id = (await response.json())["draft_id"]
-        response = await client.post(
-            base + "chat",
-            headers=headers,
-            json={"company": company, "text": f"Правка поста №{post_id}: Сделай текст короче"},
+            json={"company": company, "text": "Сократи текст"},
         )
         assert (await response.json())["draft_id"] == post_id
         response = await client.get(base + "state", headers=headers)
@@ -318,12 +338,7 @@ async def test_changed_post_requires_new_approval(settings, db):
         ) as response:
             assert response.status == 200
             company = (await response.json())["id"]
-        async with client.post(
-            url + "chat",
-            headers=headers,
-            json={"company": company, "text": "Напиши пост про стекло"},
-        ) as response:
-            assert response.status == 200
+        await create_chat_draft(client, headers, company, "Напиши пост про стекло")
         async with client.get(url + "state", headers=headers) as response:
             (post,) = (await response.json())["posts"]
         data = {"company": company, "id": post["id"], "version": post["version"]}
@@ -363,11 +378,9 @@ async def test_post_pool_links_chat_photo_edits_and_approval(settings, db):
         response = await client.post(base + "profiles", headers=headers, json={"name": "Студия"})
         company = (await response.json())["id"]
         request = "Напиши пост про стекло с картинкой"
-        response = await client.post(
-            base + "chat", headers=headers, json={"company": company, "text": request}
-        )
-        assert response.status == 200
-        draft_id = (await response.json())["draft_id"]
+        draft_id = (await create_chat_draft(client, headers, company, request, image="generate"))[
+            "draft_id"
+        ]
         response = await client.get(base + "post-pool", headers=headers)
         post_id = (await response.json())["posts"][0]["id"]
         assert post_id == draft_id
@@ -546,12 +559,7 @@ async def test_manual_album_and_shared_critique_from_miniapp_and_chat(
         base = "/miniapp/api/"
         response = await client.post(base + "profiles", headers=headers, json={"name": "Студия"})
         company = (await response.json())["id"]
-        response = await client.post(
-            base + "chat",
-            headers=headers,
-            json={"company": company, "text": "Напиши пост про кофе"},
-        )
-        assert response.status == 200
+        await create_chat_draft(client, headers, company, "Напиши пост про кофе")
         state = await (await client.get(base + "state", headers=headers)).json()
         post = state["posts"][0]
         buffer = BytesIO()
