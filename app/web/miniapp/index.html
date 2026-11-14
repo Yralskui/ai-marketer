@@ -4,30 +4,54 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Маркетолог</title>
-<link rel="stylesheet" href="/miniapp/ui.css">
+<link rel="stylesheet" href="/miniapp/ui.css?v=apple-layout-11">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="/miniapp/ui.js" defer></script>
+<script src="/miniapp/ui.js?v=apple-layout-11" defer></script>
 </head>
 <body>
 <div class="app">
   <aside class="rail">
-    <div class="wordmark"><span class="brand-icon" data-icon="layers"></span><span>Маркетолог</span></div>
-    <div class="workspace" id="workspace" hidden><span class="workspace-icon" data-icon="building-2"></span><span id="workspace-name"></span></div>
   <nav aria-label="Разделы" id="tabs" hidden>
-    <button data-tab="home" type="button"><span data-icon="layout-dashboard"></span>Главная</button>
-    <button data-tab="chat" type="button"><span data-icon="messages-square"></span>Чат</button>
+    <button data-tab="home" type="button"><span data-icon="house"></span>Главная</button>
+    <button data-tab="chat" type="button"><span data-icon="message-circle"></span>Чат</button>
     <button data-tab="profile" type="button"><span data-icon="user-round"></span>Профиль</button>
   </nav>
   </aside>
+  <div class="viewport">
   <div class="page">
     <header class="topbar">
-      <div class="title-group"><p id="company" hidden></p><h1 id="title">Маркетолог</h1></div>
-      <button id="refresh" class="icon-button" type="button" aria-label="Обновить" data-icon="refresh-cw"></button>
+      <span id="assistant-mark" class="assistant-mark" data-icon="sparkles" aria-hidden="true" hidden></span>
+      <div class="title-group"><p id="company" class="page-eyebrow" hidden></p><h1 id="title">Маркетолог</h1><p id="profile-count" class="profile-count" hidden></p></div>
+      <button id="user-avatar" class="user-avatar" type="button" aria-label="Открыть профиль" hidden></button>
+      <button id="refresh" hidden class="icon-button" type="button" aria-label="Обновить" data-icon="refresh-cw"></button>
     </header>
     <p id="notice" role="status" aria-live="polite" hidden></p>
-    <main id="screen" aria-live="polite"><p class="empty">Загружаю…</p></main>
+    <main id="screen" class="screen" aria-live="polite"><p class="loading-status" role="status"><i class="loading-spinner" aria-hidden="true"></i>Загружаем…</p></main>
+  </div>
   </div>
 </div>
-<dialog id="sheet" aria-labelledby="sheet-title"><div class="sheet-bar"><h2 id="sheet-title"></h2><button id="close" class="icon-button" type="button" aria-label="Закрыть" data-icon="x"></button></div><div id="sheet-body"></div></dialog>
+<dialog id="sheet" aria-labelledby="sheet-title"><div class="sheet-bar"><div class="sheet-heading"><button id="sheet-back" class="icon-button" type="button" aria-label="Назад" hidden></button><div><h2 id="sheet-title"></h2><p id="sheet-subtitle" hidden></p></div></div><button id="close" class="icon-button" type="button" aria-label="Закрыть" data-icon="x"></button></div><div id="sheet-body"></div></dialog>
+<dialog id="confirm-file" aria-labelledby="confirm-file-title">
+  <h2 id="confirm-file-title">Удалить файл?</h2>
+  <p></p>
+  <form method="dialog">
+    <button value="cancel" type="submit" autofocus>Отмена</button>
+    <button value="delete" type="submit" class="danger">Удалить</button>
+  </form>
+</dialog>
+<dialog class="viewer" id="storyViewer" aria-label="История">
+  <div class="viewer-media"><img alt=""></div>
+  <div class="viewer-ui">
+    <div class="sv-head">
+      <img class="sv-thumb" alt="">
+      <div class="sv-brand"><b></b></div>
+      <button class="sv-close" type="button" data-icon="x" aria-label="Закрыть историю"></button>
+    </div>
+    <div class="sv-content"><h2 class="sv-title"></h2><p class="sv-text"></p></div>
+    <div class="sv-bars" aria-hidden="true"></div>
+  </div>
+  <button class="sv-zone prev" type="button" data-icon="chevron-right" aria-label="Предыдущая история"></button>
+  <button class="sv-zone next" type="button" data-icon="chevron-right" aria-label="Следующая история"></button>
+</dialog>
 </body>
 </html>

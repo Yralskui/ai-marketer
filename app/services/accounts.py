@@ -279,9 +279,13 @@ def _require_admin(user: User) -> None:
 def normalize_channel_id(raw: str) -> str:
     """'@name', 't.me/name', '-100…' → идентификатор для Bot API."""
     value = raw.strip()
-    for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
-        if value.lower().startswith(prefix):
-            value = "@" + value[len(prefix) :].strip("/")
+    link = re.fullmatch(
+        r"(?:https?://)?(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]+)(?:/\d+)?/?(?:[?#].*)?",
+        value,
+        re.IGNORECASE,
+    )
+    if link:
+        value = "@" + link[1]
     if value and not value.startswith(("@", "-")) and not value.isdigit():
         value = "@" + value
     if not CHANNEL_ID_RE.match(value):

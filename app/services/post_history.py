@@ -6,7 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import EventLog, Post, PostRevision
-from app.db.publications import RevisionDecision, RevisionProvenance
+from app.db.publications import (
+    PostAttachments,
+    RevisionAttachments,
+    RevisionDecision,
+    RevisionProvenance,
+)
 from app.db.repositories import PostRepo
 
 
@@ -49,6 +54,9 @@ async def save_revision(
     elif post.image_path and image_source is None:
         image_source = "legacy"
     revision = await PostRepo(session).add_revision(post, post.text, instruction)
+    attachments = await session.get(PostAttachments, post.id)
+    if attachments:
+        session.add(RevisionAttachments(revision_id=revision.id, items=attachments.items))
     session.add(
         RevisionProvenance(
             revision_id=revision.id,

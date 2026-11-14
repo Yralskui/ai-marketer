@@ -89,6 +89,7 @@ class EventType(StrEnum):
     POST_APPROVED = "post_approved"
     POST_REJECTED = "post_rejected"
     POST_SCHEDULED = "post_scheduled"
+    POST_UNSCHEDULED = "post_unscheduled"
     POST_PUBLISHED = "post_published"
     POST_FAILED = "post_failed"
     PROFILE_UPDATED = "profile_updated"

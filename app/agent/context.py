@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,13 @@ class AgentContext:
     created_post_ids: list[int] = field(default_factory=list)
     reference: str = ""
     request_id: int | None = None
+    research_llm: LLMProvider | None = None
+    web_context: str = ""
+    progress: Callable[[str], None] | None = None
+
+    def update_progress(self, stage: str) -> None:
+        if self.progress is not None:
+            self.progress(stage)
 
     @property
     def user_id(self) -> int:

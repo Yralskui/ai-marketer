@@ -25,6 +25,7 @@ from app.db.models import (
     Post,
     PostStatus,
 )
+from app.db.publications import PostAttachments
 from app.db.repositories import ChannelRepo, EventLogRepo, PostRepo
 from app.publishers.base import Publisher, PublishError, PublishResult
 from app.services.post_history import record_decision
@@ -121,6 +122,8 @@ class PublishingService:
             raise PublishError(
                 "Канал для публикации не настроен — подключите его командой /channel"
             )
+        attachments = await session.get(PostAttachments, post.id)
+        post.delivery_media = attachments.items if attachments else None
         return await publisher.publish(post, channel)
 
     async def _resolve_channel(self, session: AsyncSession, post: Post) -> Channel | None:

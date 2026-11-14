@@ -94,6 +94,7 @@ async def approve_and_publish(
     publishing: PublishingService,
     *,
     expected_version: str | None = None,
+    allow_draft: bool = False,
 ) -> PublishOutcome:
     """Кнопка «Опубликовать сейчас».
 
@@ -104,6 +105,8 @@ async def approve_and_publish(
         await session.refresh(post)
         if expected_version is not None and post.updated_at.isoformat() != expected_version:
             raise PostChangedError
+        if allow_draft and post.status == PostStatus.DRAFT:
+            transition(post, PostStatus.PENDING_APPROVAL)
         if post.status not in (PostStatus.PENDING_APPROVAL, PostStatus.FAILED, PostStatus.APPROVED):
             return PublishOutcome(
                 ok=False,

@@ -65,6 +65,15 @@ class ResponsesProvider(LLMProvider):
             "reasoning": {"effort": "low"},
             "store": False,
         }
+        if task == "web_brief":
+            options.update(
+                tools=[{"type": "web_search", "search_context_size": "low"}],
+                tool_choice="required",
+                max_tool_calls=2,
+                max_output_tokens=550,
+            )
+        elif task == "post_critique":
+            options["max_output_tokens"] = 650
         if tools:
             options["tools"] = [{"type": "function", **tool["function"]} for tool in tools]
         if json_mode:
@@ -88,4 +97,21 @@ class ResponsesProvider(LLMProvider):
             if usage
             else None
         )
+        if task == "web_brief":
+            citations = {}
+            for item in response.output:
+                if item.type != "message":
+                    continue
+                for part in item.content:
+                    for annotation in getattr(part, "annotations", ()):
+                        if annotation.type == "url_citation":
+                            citations[annotation.url] = annotation.title
+            return LLMResponse(
+                json.dumps(
+                    {"summary": response.output_text, "sources": list(citations.items())},
+                    ensure_ascii=False,
+                ),
+                calls,
+                raw,
+            )
         return LLMResponse(response.output_text, calls, raw)

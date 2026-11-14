@@ -19,6 +19,7 @@ from app.images.base import ImageProvider
 from app.images.factory import create_image_provider
 from app.llm.base import LLMProvider
 from app.llm.factory import create_llm
+from app.llm.responses_provider import ResponsesProvider
 from app.publishers.analytics import AnalyticsSource
 from app.publishers.base import Publisher
 from app.publishers.max import MaxPublisher
@@ -48,6 +49,7 @@ class AppContainer:
     scheduler: AsyncIOScheduler | None = None
     upload_links: UploadLinks = field(default_factory=UploadLinks)
     storage: ObjectStorage | None = None
+    research_llm: LLMProvider | None = None
     analytics_sources: dict[Platform, AnalyticsSource] = field(default_factory=dict)
 
 
@@ -107,5 +109,19 @@ def build_container(settings: Settings, bot: Bot | None = None) -> AppContainer:
         notifier=notifier,
         bot=bot,
         analytics_sources=analytics_sources,
+        research_llm=MeteredLLM(
+            ResponsesProvider(
+                settings.model_copy(
+                    update={
+                        "llm_model_light": "gpt-6-luna",
+                        "llm_max_retries": 0,
+                    }
+                )
+            ),
+            recorder,
+            "gpt-6-luna",
+        )
+        if settings.llm_provider == "openai"
+        else None,
         storage=ObjectStorage(settings) if settings.s3_endpoint else None,
     )

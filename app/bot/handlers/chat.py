@@ -80,6 +80,7 @@ async def on_text(
         container.llm,
         container.images,
         chat_id=message.chat.id,
+        research_llm=container.research_llm,
     )
     try:
         async with (

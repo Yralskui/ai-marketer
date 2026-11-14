@@ -72,6 +72,72 @@ async def test_report_and_history_are_available_for_selected_company(settings, d
         assert (await response.json())["posts"] == []
 
 
+async def test_accept_publishes_and_chat_revision_keeps_draft(settings, db):
+    from unittest.mock import AsyncMock
+
+    from app.db.models import Platform
+    from app.db.repositories import ChannelRepo
+    from app.publishers.base import PublishResult
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    publisher = AsyncMock()
+    publisher.publish.return_value = PublishResult("555", "https://t.me/test_channel/555")
+    container.publishing.publishers[Platform.TELEGRAM] = publisher
+    app = web.Application()
+    MiniApp(container).register(app)
+    base = "/miniapp/api/"
+    headers = {"Authorization": "Telegram " + signed_user(76)}
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get(base + "state", headers=headers)
+        company = (await response.json())["active"]
+        async with db.sessionmaker.begin() as session:
+            await ChannelRepo(session).upsert(company, Platform.TELEGRAM, "@test_channel")
+        response = await client.post(
+            base + "chat",
+            headers=headers,
+            json={"company": company, "text": "Напиши пост про стекло"},
+        )
+        post_id = (await response.json())["draft_id"]
+        response = await client.post(
+            base + "chat",
+            headers=headers,
+            json={"company": company, "text": f"Правка поста №{post_id}: Сделай текст короче"},
+        )
+        assert (await response.json())["draft_id"] == post_id
+        response = await client.get(base + "state", headers=headers)
+        (post,) = (await response.json())["posts"]
+        payload = {
+            "company": company,
+            "id": post_id,
+            "version": post["version"],
+            "action": "approve",
+        }
+        response = await client.post(base + "post", headers=headers, json=payload)
+        assert await response.json() == {
+            "ok": True,
+            "simulated": False,
+            "url": "https://t.me/test_channel/555",
+        }
+        response = await client.get(base + "state", headers=headers)
+        state = await response.json()
+        assert state["posts"] == []
+        (preview,) = state["chat_posts"]
+        assert preview["id"] == post_id
+        assert preview["status"] == "published"
+        assert preview["text"] == post["text"]
+        response = await client.post(base + "post", headers=headers, json=payload)
+        assert response.status == 409
+        publisher.publish.assert_awaited_once()
+        response = await client.get(f"{base}versions?id={post_id}", headers=headers)
+        timeline = (await response.json())["timeline"]
+        assert [row["type"] for row in timeline] == ["request", "revision", "post_published"]
+        assert timeline[-1]["data"] == ""
+
+
 async def test_plan_approval_generates_draft_once(settings, db, images):
     settings.bot_token = BOT_TOKEN
     settings.miniapp_open_signup = True
@@ -207,8 +273,14 @@ async def test_profiles_are_private_and_default_is_copied(settings, db, tmp_path
         status, a = await request(1, "GET", "state")
         assert status == 200
         _, b = await request(2, "GET", "state")
-        assert a["profiles"][0]["name"] == b["profiles"][0]["name"] == "Салаватстекло"
+        assert a["profiles"][0]["name"] == b["profiles"][0]["name"] == "Салават Стекло"
+        assert len(a["profiles"]) == len(b["profiles"]) == 1
+        assert a["profiles"][0]["is_default"] and b["profiles"][0]["is_default"]
         assert a["active"] != b["active"]
+        assert (await request(1, "DELETE", "profile", {"company": a["active"]}))[0] == 403
+        assert (await request(1, "POST", "profile", {"company": a["active"], "action": "delete"}))[
+            0
+        ] == 403
         assert (await request(2, "POST", "select", {"id": a["active"]}))[0] == 404
         assert (await request(2, "POST", "chat", {"company": a["active"], "text": "покажи посты"}))[
             0
@@ -222,7 +294,9 @@ async def test_profiles_are_private_and_default_is_copied(settings, db, tmp_path
         assert (await request(1, "PATCH", "profile", {"company": new_id, "name": "Бета"}))[0] == 200
         assert (await request(1, "POST", "select", {"id": None}))[0] == 200
         assert (await request(1, "GET", "state"))[1]["active"] is None
-        assert (await request(1, "DELETE", "profile", {"company": new_id}))[0] == 200
+        assert (await request(1, "POST", "profile", {"company": new_id, "action": "delete"}))[
+            0
+        ] == 200
         _, state = await request(1, "GET", "state")
         assert [profile["id"] for profile in state["profiles"]] == [a["active"]]
 
@@ -293,10 +367,14 @@ async def test_post_pool_links_chat_photo_edits_and_approval(settings, db):
             base + "chat", headers=headers, json={"company": company, "text": request}
         )
         assert response.status == 200
+        draft_id = (await response.json())["draft_id"]
         response = await client.get(base + "post-pool", headers=headers)
         post_id = (await response.json())["posts"][0]["id"]
+        assert post_id == draft_id
+        response = await client.get(base + "state", headers=headers)
+        assert (await response.json())["history"][-1]["draft_id"] == post_id
         for action, extra in [
-            ("approve", {}),
+            ("approve", {"when": (datetime.now().astimezone() + timedelta(days=1)).isoformat()}),
             ("revise", {"instruction": "Сделай текст короче"}),
             ("remove_photo", {}),
             ("publish", {}),
@@ -316,7 +394,15 @@ async def test_post_pool_links_chat_photo_edits_and_approval(settings, db):
             )
             assert response.status == 200, await response.json()
         response = await client.get(f"{base}versions?id={post_id}", headers=headers)
-        one, two, three = (await response.json())["versions"]
+        details = await response.json()
+        one, two, three = details["versions"]
+        assert [event["type"] for event in details["timeline"]] == [
+            "request",
+            "post_scheduled",
+            "revision",
+            "revision",
+            "simulation",
+        ]
         assert one["request_id"] and one["request"] == request and one["image_prompt"]
         assert [event["type"] for event in one["decisions"]] == ["post_approved"]
         assert two["parent_id"] == one["id"] and two["image_prompt"] == one["image_prompt"]
@@ -369,3 +455,250 @@ async def test_metrics_calendar_and_profile_isolation(settings, db):
         await client.post(base + "profiles", headers=headers, json={"name": "Другой канал"})
         response = await client.get(base + "metrics?hours=168", headers=headers)
         assert (await response.json())["channels"] == []
+        response = await client.get(base + "state", headers=headers)
+        dashboard = (await response.json())["dashboard"]
+        assert dashboard["subscribers"] == dashboard["views_7d"] == dashboard["published"] == 0
+
+
+async def test_chat_progress_is_scoped_and_cleared(settings, db, monkeypatch):
+    import asyncio
+    from uuid import uuid4
+
+    from app.web import miniapp
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    app = web.Application()
+    MiniApp(container).register(app)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def answer(ctx, _message):
+        ctx.update_progress("image")
+        started.set()
+        await finish.wait()
+        return {"text": "Готово"}
+
+    monkeypatch.setattr(miniapp, "answer", answer)
+    base = "/miniapp/api/"
+    headers = {"Authorization": "Telegram " + signed_user(74)}
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get(base + "state", headers=headers)
+        company = (await response.json())["active"]
+        request_id = str(uuid4())
+        progress = f"{base}chat-progress?company={company}&id={request_id}"
+        task = asyncio.ensure_future(
+            client.post(
+                base + "chat",
+                headers=headers,
+                json={"company": company, "id": request_id, "text": "Сделай пост"},
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), 3)
+            response = await client.get(progress, headers=headers)
+            assert await response.json() == {"stage": "image"}
+            response = await client.get(
+                progress, headers={"Authorization": "Telegram " + signed_user(75)}
+            )
+            assert response.status == 404
+        finally:
+            finish.set()
+            response = await task
+        assert await response.json() == {"text": "Готово"}
+        response = await client.get(progress, headers=headers)
+        assert await response.json() == {"stage": None}
+
+
+async def test_manual_album_and_shared_critique_from_miniapp_and_chat(
+    settings, db, monkeypatch, tmp_path
+):
+    from datetime import timedelta
+    from io import BytesIO
+    from unittest.mock import AsyncMock
+
+    from PIL import Image
+
+    from app.db.models import Post
+    from app.db.publications import PostSnapshot
+    from app.services import media
+    from app.utils.time import utcnow
+
+    monkeypatch.setattr("app.web.miniapp.IMAGES_DIR", tmp_path)
+    monkeypatch.setattr(media, "UPLOADS_DIR", tmp_path)
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    settings.publish_dry_run = True
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    container.research_llm = AsyncMock()
+    container.research_llm.complete.return_value = (
+        '{"facts":"Есть замеры","hypothesis":"Гипотеза","next":"Проверка"}'
+    )
+    app = web.Application()
+    MiniApp(container).register(app)
+    headers = {"Authorization": "Telegram " + signed_user(74)}
+    async with TestClient(TestServer(app)) as client:
+        base = "/miniapp/api/"
+        response = await client.post(base + "profiles", headers=headers, json={"name": "Студия"})
+        company = (await response.json())["id"]
+        response = await client.post(
+            base + "chat",
+            headers=headers,
+            json={"company": company, "text": "Напиши пост про кофе"},
+        )
+        assert response.status == 200
+        state = await (await client.get(base + "state", headers=headers)).json()
+        post = state["posts"][0]
+        buffer = BytesIO()
+        Image.new("RGB", (20, 20)).save(buffer, "PNG")
+        upload_headers = {
+            **headers,
+            "Content-Type": "application/octet-stream",
+            "X-Filename": "coffee.png",
+        }
+        photo_ids = []
+        for _ in range(2):
+            response = await client.put(
+                base + f"attachment?company={company}",
+                headers=upload_headers,
+                data=buffer.getvalue(),
+            )
+            assert response.status == 200
+            photo_ids.append((await response.json())["id"])
+        response = await client.post(
+            base + "post",
+            headers=headers,
+            json={
+                "company": company,
+                "id": post["id"],
+                "version": post["version"],
+                "action": "edit_text",
+                "text": "**Кофе** [Меню](https://example.org/menu)",
+                "media": photo_ids,
+            },
+        )
+        assert response.status == 200, await response.json()
+        state = await (await client.get(base + "state", headers=headers)).json()
+        post = state["posts"][0]
+        assert len(post["media"]) == 2
+        preview = await client.get(f"{base}preview?id={post['id']}&media=1", headers=headers)
+        assert preview.status == 200
+        assert (await preview.read()).startswith(b"\xff\xd8")
+        response = await client.post(
+            base + "post",
+            headers=headers,
+            json={
+                "company": company,
+                "id": post["id"],
+                "version": post["version"],
+                "action": "publish",
+            },
+        )
+        assert response.status == 200
+        async with db.sessionmaker.begin() as session:
+            saved = await session.get(Post, post["id"])
+            saved.published_at = utcnow() - timedelta(hours=3)
+            session.add(
+                PostSnapshot(post_id=saved.id, hour=utcnow() - timedelta(hours=1), views=15)
+            )
+        response = await client.post(
+            base + "chat",
+            headers=headers,
+            json={
+                "company": company,
+                "text": f"Разбери пост №{post['id']}",
+            },
+        )
+        assert "Гипотеза" in (await response.json())["text"]
+        response = await client.post(
+            base + "critique", headers=headers, json={"company": company, "id": post["id"]}
+        )
+        assert (await response.json())["critique"]["hypothesis"] == "Гипотеза"
+        response = await client.get(f"{base}metrics?post={post['id']}", headers=headers)
+        assert (await response.json())["critique"]["hypothesis"] == "Гипотеза"
+        versions = await (
+            await client.get(f"{base}versions?id={post['id']}", headers=headers)
+        ).json()
+        assert len(versions["versions"][-1]["media"]) == 2
+        container.research_llm.complete.assert_awaited_once()
+
+
+async def test_legacy_default_merges_empty_bootstrap_and_resolves_public_channel(settings, db):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import GetChat
+
+    from app.db.knowledge import MiniUserState
+    from app.db.models import Platform
+    from app.db.repositories import BusinessRepo, ChannelRepo, UserRepo
+
+    settings.bot_token = BOT_TOKEN
+    settings.miniapp_open_signup = True
+    async with db.sessionmaker.begin() as session:
+        user = await UserRepo(session).get_or_create(991, "Тест")
+        repo = BusinessRepo(session)
+        legacy = await repo.create(user.id, "Мой бизнес")
+        await ChannelRepo(session).upsert(legacy.id, Platform.TELEGRAM, "-1001234567890")
+        old_default = await repo.create(user.id, "Салаватстекло")
+        old_default.settings = {"miniapp_private": True, "default_placeholder": True}
+        session.add(MiniUserState(user_id=user.id, selected_id=legacy.id, default_created=True))
+        user.business_id = legacy.id
+        default_id = old_default.id
+    container = build_container(settings)
+    await container.db.dispose()
+    container.db = db
+    container.bot = SimpleNamespace(
+        get_chat=AsyncMock(
+            return_value=SimpleNamespace(
+                id=-1001234567890, type="channel", username="testglass", title="Канал"
+            )
+        ),
+        me=AsyncMock(return_value=SimpleNamespace(id=123456)),
+        get_chat_member=AsyncMock(
+            return_value=SimpleNamespace(status="administrator", can_post_messages=True)
+        ),
+    )
+    app = web.Application()
+    MiniApp(container).register(app)
+    async with TestClient(TestServer(app)) as client:
+        headers = {"Authorization": "Telegram " + signed_user(991)}
+        response = await client.get("/miniapp/api/state", headers=headers)
+        assert response.status == 200
+        state = await response.json()
+        assert state["active"] == default_id
+        (profile,) = state["profiles"]
+        assert profile["name"] == "Салават Стекло" and profile["is_default"]
+        assert profile["channel"] == "@testglass"
+        response = await client.get("/miniapp/api/state", headers=headers)
+        assert response.status == 200
+        container.bot.get_chat.assert_awaited_once_with(-1001234567890)
+
+        status_url = f"/miniapp/api/channel-status?company={default_id}"
+        response = await client.get(status_url, headers=headers)
+        assert await response.json() == {
+            "ok": True,
+            "message": "Подключено",
+            "label": "@testglass",
+        }
+        container.bot.get_chat_member.assert_awaited_once_with(-1001234567890, 123456)
+
+        container.bot.get_chat_member.return_value.can_post_messages = False
+        response = await client.get(status_url, headers=headers)
+        assert (await response.json())["message"] == "Нет права публиковать"
+
+        container.bot.get_chat.side_effect = TelegramBadRequest(
+            method=GetChat(chat_id=-1001234567890), message="chat not found"
+        )
+        response = await client.get(status_url, headers=headers)
+        assert (await response.json())["message"] == "Канал не найден или недоступен боту"
+
+        outsider = {"Authorization": "Telegram " + signed_user(992)}
+        response = await client.get(status_url, headers=outsider)
+        assert response.status == 404

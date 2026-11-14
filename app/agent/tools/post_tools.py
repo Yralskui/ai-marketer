@@ -38,8 +38,10 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
         platform=Platform(args.platform),
         with_image=args.with_image,
         reference=ctx.reference,
+        web_context=ctx.web_context,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
         image_model=ctx.settings.image_model,
+        progress=ctx.update_progress,
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)
     ctx.created_post_ids.append(post.id)
@@ -57,6 +59,11 @@ async def create_post_draft(ctx: AgentContext, args: CreatePostArgs) -> dict:
 class RevisePostArgs(BaseModel):
     post_id: int = Field(description="Номер поста")
     instruction: str = Field(description="Что изменить, словами клиента", min_length=2)
+    research_question: str = Field(
+        "",
+        max_length=400,
+        description="Точный вопрос для поиска, только если нужны актуальные внешние факты",
+    )
 
 
 @tool(
@@ -73,6 +80,7 @@ async def revise_post(ctx: AgentContext, args: RevisePostArgs) -> dict:
         ctx.business,
         post,
         args.instruction,
+        web_context=ctx.web_context,
         source=RevisionSource("chat", request_id=ctx.request_id, author_id=ctx.user_id),
     )
     await approval.submit_for_approval(ctx.session, post, ctx.notifier, ctx.target_chat_id)

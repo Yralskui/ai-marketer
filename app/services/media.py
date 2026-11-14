@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import IMAGES_DIR
 from app.db.models import Business, EventType, MediaFile, Post, PostStatus
+from app.db.publications import PostAttachments
 from app.db.repositories import EventLogRepo, MediaRepo
 from app.images.base import ImageProvider
 from app.llm.base import LLMProvider
@@ -114,6 +115,10 @@ async def replace_post_photo(
         raise MediaError("Фото и пост из разных компаний.")
     if post.status not in (PostStatus.DRAFT,):
         transition(post, PostStatus.DRAFT)  # бросит ошибку для published/rejected
+    attachments = await session.get(PostAttachments, post.id)
+    if attachments is not None:
+        await session.delete(attachments)
+        await session.flush()
     post.image_path = media.path
     post.scheduled_at = None
     post.error = None

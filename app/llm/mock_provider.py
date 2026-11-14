@@ -91,6 +91,17 @@ class MockLLMProvider(LLMProvider):
         if task in {"result_list_posts", "result_analytics"}:
             tool = "list_posts" if task == "result_list_posts" else "get_analytics"
             return LLMResponse(content=_summarize_tool_result(tool, last_user))
+        if task == "post_critique":
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "facts": "Есть замеры просмотров публикации.",
+                        "hypothesis": "На отклик могла повлиять формулировка первого абзаца.",
+                        "next": "Проверьте другой заголовок в следующем посте на похожую тему.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
         if task == "write_post":
             return LLMResponse(content=_write_post(last_user))
         if task == "revise_post":
