@@ -1217,13 +1217,15 @@ const profileFields = {
     name:"Название", description:"Чем занимается", products:"Продукты и услуги",
     audience:"Аудитория", usp:"Что отличает компанию", tone:"Тон общения",
     visual_style:"Визуальный стиль", restrictions:"Ограничения", channel:"Telegram-канал",
+    vk_channel:"Сообщество ВКонтакте",
 };
 const profileHints = {
     description: "2–3 предложения: кто вы и чем полезны клиентам",
     products: "Через запятую",
     tone: "Например: деловой, дружелюбный, без сленга",
     restrictions: "Что нельзя писать: цены, обещания, сравнения…",
-    channel: "@username или ссылка на канал; бот должен быть админом",
+    channel: "@username или ссылка на канал; бот должен быть админом. Можно оставить пустым",
+    vk_channel: "vk.com/название или club123. Можно оставить пустым и подключить позже",
 };
 
 function profile(company) {
@@ -1257,7 +1259,7 @@ function profile(company) {
         top.append(name);
         card.append(top);
 
-        const keys = Object.keys(profileFields).filter((key) => key !== "channel");
+        const keys = Object.keys(profileFields).filter((key) => key !== "channel" && key !== "vk_channel");
         const filled = keys.filter((key) => {
             const value = company.details[key];
             return Array.isArray(value) ? value.length : value;
@@ -1361,7 +1363,8 @@ function channelSheet(company) {
     form.addEventListener("submit", (event) => {
         event.preventDefault();
         guarded(submit, async () => {
-            await api("profile", "PATCH", {company: company.id, channel: input.value.trim()});
+            const saved = await api("profile", "PATCH", {company: company.id, channel: input.value.trim()});
+            if (saved.warnings?.length) throw new Error(saved.warnings.join(" "));
             haptic("success");
             closeSheet();
             await load();
@@ -1409,7 +1412,8 @@ function vkSheet(company) {
     form.addEventListener("submit", (event) => {
         event.preventDefault();
         guarded(submit, async () => {
-            await api("profile", "PATCH", {company: company.id, vk_channel: input.value.trim()});
+            const saved = await api("profile", "PATCH", {company: company.id, vk_channel: input.value.trim()});
+            if (saved.warnings?.length) throw new Error(saved.warnings.join(" "));
             haptic("success");
             closeSheet();
             await load();
@@ -1640,7 +1644,7 @@ function profileForm(company) {
         const input = el(multiline ? "textarea" : "input");
         input.name = key;
         if (multiline) input.rows = key === "description" ? 4 : 2;
-        const value = key === "channel" ? company?.channel : company?.details[key];
+        const value = key === "channel" ? company?.channel : key === "vk_channel" ? company?.vk_id : company?.details[key];
         input.value = Array.isArray(value) ? value.join(", ") : value || "";
         input.maxLength = key === "name" ? 255 : 2000;
         input.required = key === "name";
@@ -1673,6 +1677,7 @@ function profileForm(company) {
             closeSheet();
             await load();
             feedback(company ? "Профиль сохранён" : "Компания создана", "success");
+            if (saved.warnings?.length) feedback(saved.warnings.join(" "), "warning");
         });
     });
     showSheet(company ? "Профиль компании" : "Новая компания", form);

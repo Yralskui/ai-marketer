@@ -138,9 +138,6 @@ async def run_scenario(ctx: AgentContext, intent: str, text: str, history: str) 
         args = schema.model_validate_json(raw)
     except ValidationError:
         return {"text": await remember(ctx, text, clarify)}
-    if isinstance(args, DraftRequest) and args.platform != "telegram":
-        reply = "Сейчас доступна публикация в Telegram. Могу подготовить черновик для Telegram."
-        return {"text": await remember(ctx, text, reply)}
     when = None
     if isinstance(args, DraftRequest) and args.when:
         try:
@@ -162,8 +159,15 @@ async def run_scenario(ctx: AgentContext, intent: str, text: str, history: str) 
     result = await run(ctx, args)
     if result.get("error"):
         reply = result["error"]
+    elif result.get("needs_platform_choice"):
+        reply = result["message"]
     elif intent in {"create_post", "revise_post"}:
-        reply = f"Черновик №{result['post_id']} готов и ждёт согласования."
+        if result.get("posts"):
+            numbers = ", ".join(f"№{item['post_id']}" for item in result["posts"])
+            reply = f"Черновики {numbers} готовы и ждут согласования: по одному на каждую соцсеть."
+            when = None  # время назначают при согласовании каждого поста
+        else:
+            reply = f"Черновик №{result['post_id']} готов и ждёт согласования."
         if result.get("warning"):
             reply += " " + result["warning"]
         if when is not None:

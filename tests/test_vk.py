@@ -732,11 +732,18 @@ async def test_miniapp_vk_flow(settings, db, vk):
         )
         assert response.status == 400 and "подключите" in (await response.json())["error"]
 
-        # неверная ссылка — понятная ошибка, ничего не сохраняется
+        # неверная ссылка не блокирует сохранение профиля: он сохраняется, а человек получает
+        # предупреждение; сообщество при этом не подключается
         response = await client.patch(
-            api + "profile", headers=headers, json={"company": company, "vk_channel": "не!ссылка"}
+            api + "profile",
+            headers=headers,
+            json={"company": company, "description": "Новое описание", "vk_channel": "не!ссылка"},
         )
-        assert response.status == 400
+        body = await response.json()
+        assert response.status == 200 and "ВКонтакте не подключено" in body["warnings"][0]
+        state = await (await client.get(api + "state", headers=headers)).json()
+        assert state["profiles"][0]["vk_channel"] == ""
+        assert state["profiles"][0]["details"]["description"] == "Новое описание"
 
         response = await client.patch(
             api + "profile",
@@ -1038,3 +1045,70 @@ async def test_longpoll_loop_handles_stale_key_and_stops(db, session, owner, vk)
     assert vk.methods().count("groups.getLongPollServer") == 2  # после failed=2 — новый адрес
     async with db.sessionmaker() as check:
         assert len((await check.execute(Comment.__table__.select())).all()) == 1
+
+
+# ----------------------------------------------------------------------------- агент: куда публиковать
+
+
+async def _connect(session, company, *platforms):
+    for platform in platforms:
+        await ChannelRepo(session).upsert(company.id, platform, f"id-{platform.value}", "канал")
+    await session.commit()
+
+
+async def test_agent_asks_where_to_publish_when_both_connected(agent_ctx, session):
+    from app.agent.tools.post_tools import CreatePostArgs, create_post_draft
+
+    await _connect(session, agent_ctx.business, Platform.TELEGRAM, Platform.VK)
+    result = await create_post_draft(agent_ctx, CreatePostArgs(topic="Новое меню"))
+    assert result["needs_platform_choice"] and "ВКонтакте" in result["message"]
+    assert agent_ctx.created_post_ids == []  # пока не знаем куда — черновика нет
+
+
+async def test_agent_does_not_ask_with_one_channel_or_named_platform(agent_ctx, session):
+    from app.agent.tools.post_tools import CreatePostArgs, create_post_draft
+
+    await _connect(session, agent_ctx.business, Platform.VK)
+    tg = await ChannelRepo(session).get_active(agent_ctx.business.id, Platform.TELEGRAM)
+    if tg is not None:
+        tg.is_active = False  # в тестовой компании Telegram может быть подключён заранее
+    result = await create_post_draft(agent_ctx, CreatePostArgs(topic="Новое меню"))
+    post = await session.get(Post, result["post_id"])
+    assert post.platform == Platform.VK  # подключена одна соцсеть — вопроса нет
+
+    await _connect(session, agent_ctx.business, Platform.TELEGRAM)
+    named = await create_post_draft(
+        agent_ctx, CreatePostArgs(topic="Акция", platforms=["telegram"])
+    )
+    assert (await session.get(Post, named["post_id"])).platform == Platform.TELEGRAM
+
+
+async def test_agent_makes_a_draft_for_each_named_network(agent_ctx, session):
+    from app.agent.tools.post_tools import CreatePostArgs, create_post_draft
+
+    await _connect(session, agent_ctx.business, Platform.TELEGRAM, Platform.VK)
+    result = await create_post_draft(
+        agent_ctx, CreatePostArgs(topic="Акция", platforms=["telegram", "vk"])
+    )
+    kinds = {item["platform"] for item in result["posts"]}
+    assert kinds == {"telegram", "vk"} and len(agent_ctx.created_post_ids) == 2
+
+
+async def test_agent_without_channels_still_writes_a_draft(agent_ctx):
+    from app.agent.tools.post_tools import CreatePostArgs, create_post_draft
+
+    result = await create_post_draft(agent_ctx, CreatePostArgs(topic="Новое меню"))
+    assert result["status"] == "pending_approval"
+
+
+async def test_post_without_channel_fails_with_clear_error_and_can_be_retried(db, session, owner):
+    _, company = owner
+    service = PublishingService({Platform.VK: VKPublisher(VKClients({}))})
+    post_row = Post(
+        business_id=company.id, platform=Platform.VK, text="Текст", status=PostStatus.APPROVED
+    )
+    session.add(post_row)
+    await session.commit()
+    outcome = await service.publish(session, post_row)
+    assert not outcome.ok and "не настроен" in outcome.error
+    assert post_row.status == PostStatus.FAILED  # из «ошибки» пост можно снова утвердить

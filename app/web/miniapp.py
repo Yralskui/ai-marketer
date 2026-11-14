@@ -318,10 +318,10 @@ class MiniApp:
                         raise ValueError("Укажите название")
                     company = await BusinessRepo(session).create(user.id, name)
                     company.settings = {"miniapp_private": True}
-                    await self.edit_profile(session, company, user, data)
+                    warnings = await self.edit_profile(session, company, user, data)
                     selection.selected_id = company.id
                     await session.commit()
-                    return json_response({"ok": True, "id": company.id})
+                    return json_response({"ok": True, "id": company.id, "warnings": warnings})
                 else:
                     company = allowed.get(data.get("company"))
                     if company is None:
@@ -341,7 +341,9 @@ class MiniApp:
                             return await self.occasion_draft(session, company, user, data)
                         return await self.send_carousel(session, company, user, data)
                     if action == "profile" and method == "PATCH":
-                        await self.edit_profile(session, company, user, data)
+                        warnings = await self.edit_profile(session, company, user, data)
+                        await session.commit()
+                        return json_response({"ok": True, "warnings": warnings})
                     elif action == "profile":
                         if default_profile.is_preset(company):
                             return json_response(
@@ -1094,6 +1096,7 @@ class MiniApp:
                     "invite_enabled": accounts.is_admin(user) and company.owner_id == user.id,
                     "channel": channel.external_id if channel else "",
                     "vk_channel": (vk.title or vk.external_id) if vk else "",
+                    "vk_id": vk.external_id if vk else "",
                     "vk_enabled": bool(self.container.settings.vk_tokens),
                     "preset": default_profile.is_preset(company),
                 }
@@ -1141,7 +1144,7 @@ class MiniApp:
             }
         ]
 
-    async def edit_profile(self, session, company, user, data) -> None:
+    async def edit_profile(self, session, company, user, data) -> list[str]:
         fields = {
             key: str(value)[:2000]
             for key, value in data.items()
@@ -1152,42 +1155,58 @@ class MiniApp:
         await business_profile.update_profile_fields(session, company, fields)
         if (company.settings or {}).get("default_placeholder"):
             company.settings = {**company.settings, "default_placeholder": False}
+        warnings: list[str] = []
         if data.get("channel"):
-            channel = accounts.normalize_channel_id(str(data["channel"]).strip())
-            channels = ChannelRepo(session)
-            existing = await channels.get_active(company.id, Platform.TELEGRAM)
-            if existing is None or existing.external_id != channel:
-                bot = self.container.bot
-                if bot is None:
-                    raise ValueError(
-                        "Бот сейчас не подключён к Telegram, поэтому канал не проверить. "
-                        "Подключите канал, когда бот запущен на сервере."
-                    )
-                try:
-                    chat_id = int(channel) if channel.startswith("-100") else channel
-                    me = await bot.me()
-                    member = await bot.get_chat_member(chat_id, user.telegram_id)
-                    bot_member = await bot.get_chat_member(chat_id, me.id)
-                except TelegramAPIError:
-                    raise ValueError("Добавьте бота в канал и проверьте его адрес") from None
-                if member.status not in {ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR}:
-                    raise ValueError("Подключить канал может его администратор")
-                if bot_member.status != ChatMemberStatus.CREATOR and not getattr(
-                    bot_member, "can_post_messages", False
-                ):
-                    raise ValueError("Дайте боту право публиковать сообщения в канале")
-                await channels.upsert(company.id, Platform.TELEGRAM, channel)
+            try:
+                await self.connect_telegram(session, company, user, str(data["channel"]).strip())
+            except ValueError as exc:
+                warnings.append(f"Telegram-канал не подключён: {exc}")
         elif "channel" in data:
             current = await ChannelRepo(session).get_active(company.id, Platform.TELEGRAM)
             if current is not None:
                 current.is_active = False
         if "vk_channel" in data:
             raw = str(data["vk_channel"]).strip()
-            if raw:
+            current_vk = await ChannelRepo(session).get_active(company.id, Platform.VK)
+            if raw and current_vk is not None and raw in (current_vk.external_id, current_vk.title):
+                pass  # поле формы просто вернуло уже подключённое сообщество
+            elif raw:
                 publisher = self.container.publishing.get_publisher(Platform.VK)
-                await vk_channel.connect(session, publisher, company, raw)
+                try:
+                    await vk_channel.connect(session, publisher, company, raw)
+                except ValueError as exc:
+                    warnings.append(f"Сообщество ВКонтакте не подключено: {exc}")
             else:
                 await vk_channel.disconnect(session, company)
+        return warnings
+
+    async def connect_telegram(self, session, company, user, raw: str) -> None:
+        """Проверяет и подключает Telegram-канал. Ошибка — ValueError с понятным текстом."""
+        channel = accounts.normalize_channel_id(raw)
+        channels = ChannelRepo(session)
+        existing = await channels.get_active(company.id, Platform.TELEGRAM)
+        if existing is not None and existing.external_id == channel:
+            return
+        bot = self.container.bot
+        if bot is None:
+            raise ValueError(
+                "бот сейчас не подключён к Telegram, поэтому канал не проверить. "
+                "Подключите канал, когда бот запущен на сервере."
+            )
+        try:
+            chat_id = int(channel) if channel.startswith("-100") else channel
+            me = await bot.me()
+            member = await bot.get_chat_member(chat_id, user.telegram_id)
+            bot_member = await bot.get_chat_member(chat_id, me.id)
+        except TelegramAPIError:
+            raise ValueError("добавьте бота в канал и проверьте его адрес") from None
+        if member.status not in {ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR}:
+            raise ValueError("подключить канал может его администратор")
+        if bot_member.status != ChatMemberStatus.CREATOR and not getattr(
+            bot_member, "can_post_messages", False
+        ):
+            raise ValueError("дайте боту право публиковать сообщения в канале")
+        await channels.upsert(company.id, Platform.TELEGRAM, channel)
 
     async def upload(self, request, session, company, user) -> web.Response:
         if self.container.storage is None:
