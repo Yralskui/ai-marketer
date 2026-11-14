@@ -59,6 +59,7 @@ def test_scheduler_jobs_follow_flags(settings):
     assert {j.id for j in create_scheduler(container).get_jobs()} == {
         "publish_due_posts",
         "prepare_plan_drafts",
+        "occasion_drafts",  # календарь поводов включён по умолчанию
     }
     settings.enable_auto_drafts = True
     settings.enable_weekly_report = True
@@ -68,6 +69,7 @@ def test_scheduler_jobs_follow_flags(settings):
         "prepare_plan_drafts",
         "generate_daily_drafts",
         "weekly_report",
+        "occasion_drafts",
     }
 
 

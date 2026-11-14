@@ -18,6 +18,7 @@ JOB_TITLES = {
     "generate_daily_drafts": "Автономные предложения тем",
     "collect_social_metrics": "Почасовые метрики соцсетей",
     "weekly_report": "Еженедельный отчёт",
+    "occasion_drafts": "Посты к поводам из календаря компании",
 }
 
 
@@ -51,6 +52,18 @@ def create_scheduler(container: AppContainer) -> AsyncIOScheduler:
             id="collect_social_metrics",
             next_run_time=datetime.now(settings.tz),
             misfire_grace_time=300,
+            **common,
+        )
+    if settings.enable_occasions:
+        # Раз в день утром и сразу при старте — чтобы не пропустить повод после перезапуска
+        scheduler.add_job(
+            jobs.prepare_occasion_drafts,
+            "cron",
+            hour=9,
+            minute=5,
+            id="occasion_drafts",
+            next_run_time=datetime.now(settings.tz),
+            misfire_grace_time=3600,
             **common,
         )
     if settings.enable_auto_drafts:

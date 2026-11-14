@@ -9,7 +9,7 @@ from __future__ import annotations
 import html
 import logging
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime, tzinfo
+from datetime import date, datetime, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +20,7 @@ from app.db.models import Business, ContentPlanItemStatus, PostStatus
 from app.db.publications import PlanOrigin
 from app.db.repositories import BusinessRepo, PostRepo, UserRepo
 from app.llm.base import LLMProvider
-from app.services import approval, content_plan, posts, reports, social_metrics
+from app.services import approval, content_plan, occasions, posts, reports, social_metrics
 from app.services.business_profile import get_profile, profile_to_text
 from app.services.knowledge_search import retrieve
 from app.services.notifier import Notifier
@@ -195,6 +195,43 @@ async def prepare_plan_drafts(container: AppContainer, now: datetime | None = No
                     await container.notifier.send_draft(chat_id, post)
             except Exception:
                 log.exception("Не удалось обработать пункт контент-плана компании %s", business_id)
+    return created
+
+
+async def prepare_occasion_drafts(container: AppContainer, today: date | None = None) -> int:
+    """За LEAD_DAYS до повода из календаря компании готовит пост и шлёт на согласование."""
+    today = today or to_local(utcnow(), container.settings.tz).date()
+    async with container.db.sessionmaker() as session:
+        business_ids = [business.id for business in await BusinessRepo(session).list_all()]
+    created = 0
+    for business_id in business_ids:
+        async with container.db.sessionmaker() as session:
+            try:
+                business = await session.get(Business, business_id, with_for_update=True)
+                if business is None or (business.settings or {}).get("miniapp_archived"):
+                    continue
+                for occasion, when in occasions.due(business, today):
+                    chat_id = await _owner_chat_id(session, business.id)
+                    async with usage_scope(session, business.id):
+                        post = await posts.create_draft(
+                            session,
+                            container.llm,
+                            container.images,
+                            business,
+                            occasion.topic,
+                            with_image=True,
+                            source=RevisionSource("occasion", request_text=occasion.title),
+                            image_model=container.settings.image_model,
+                        )
+                        await approval.submit_for_approval(
+                            session, post, container.notifier, chat_id
+                        )
+                    occasions.mark_done(business, occasion, when)
+                    await session.commit()
+                    created += 1
+                    log.info("Повод «%s» (%s): черновик #%s", occasion.title, when, post.id)
+            except Exception:
+                log.exception("Черновик к поводу не создан для компании %s", business_id)
     return created
 
 

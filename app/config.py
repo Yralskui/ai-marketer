@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Yekaterinburg"
     publish_dry_run: bool = False
     enable_auto_drafts: bool = False
+    # Посты к поводам из календаря компании (дни рождения заводов, праздники)
+    enable_occasions: bool = True
     auto_drafts_interval_minutes: int = 0
     enable_weekly_report: bool = False
     publish_check_interval_seconds: int = 60
