@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ from app.services import public_posts
 
 if TYPE_CHECKING:
     from app.container import AppContainer
+
+log = logging.getLogger(__name__)
 
 HEADERS = {
     "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
@@ -74,7 +77,14 @@ class PublicPosts:
             return None
         return path
 
+    @staticmethod
+    def _log(request: web.Request, what: str) -> None:
+        """Кто и что запрашивает: так видно, заходит ли сканер соцсети за карточкой."""
+        agent = request.headers.get("User-Agent", "-")[:90]
+        log.info("Публичный пост, %s: %s | %s", what, request.path.split("/")[-1][:12], agent)
+
     async def page(self, request: web.Request) -> web.Response:
+        self._log(request, "страница")
         token = request.match_info["token"]
         loaded = await self._load(token)
         if loaded is None:
@@ -102,6 +112,7 @@ class PublicPosts:
         return web.Response(text=html, content_type="text/html", headers=HEADERS)
 
     async def card(self, request: web.Request) -> web.StreamResponse:
+        self._log(request, "баннер")
         loaded = await self._load(request.match_info["token"])
         source = self._image(loaded[0]) if loaded else None
         if loaded is None or source is None:

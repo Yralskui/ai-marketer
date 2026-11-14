@@ -89,12 +89,19 @@ class VKPublisher(Publisher):
     platform = Platform.VK
 
     def __init__(
-        self, clients: VKClients | None = None, *, public_url: str = "", secret: str = ""
+        self,
+        clients: VKClients | None = None,
+        *,
+        public_url: str = "",
+        secret: str = "",
+        card_in_text: bool = False,
     ) -> None:
         self.clients = clients or VKClients({})
         # Адрес сайта и секрет для карточек-ссылок: без них картинку без токена админа не показать
         self.public_url = public_url
         self.secret = secret
+        # Ссылка на страницу поста в тексте записи (вместо картинки); по умолчанию выключено
+        self.card_in_text = card_in_text
 
     # ------------------------------------------------------------------ подключение
 
@@ -138,6 +145,7 @@ class VKPublisher(Publisher):
         text = post.text[: PLATFORM_HARD_LIMITS[Platform.VK]]
         attachments: list[str] = []
         note: str | None = None
+        link_in_text: str | None = None
         if post.image_path:
             image = Path(post.image_path)
             if not image.exists():
@@ -150,18 +158,21 @@ class VKPublisher(Publisher):
                         raise PublishError(
                             f"ВКонтакте: не удалось загрузить картинку — {exc}"
                         ) from exc
-                    # Ключ сообщества не загружает фото. Картинку тогда показывает
-                    # карточка-ссылка на публичную страницу поста (Open Graph).
-                    card = self._card_link(post)
+                    # Ключ сообщества не загружает фото (проверено на живом ключе). Вложение-
+                    # ссылку ВК тоже отвергает: «No photo given», а «фото сообщений» молча
+                    # выбрасывает. Остаётся ссылка в тексте — по включённому card_in_text.
+                    card = self._card_link(post) if self.card_in_text else None
                     if card is not None:
-                        log.info("VK: картинка поста #%s — карточкой-ссылкой", post.id)
-                        attachments.append(card)
+                        link_in_text = card
                     else:
                         log.warning("VK: картинка поста #%s не загружена: %s", post.id, exc)
                         note = (
                             "Пост вышел без картинки: ВКонтакте не принял загрузку фото ключом "
                             "сообщества. Для картинок может понадобиться токен администратора."
                         )
+        if link_in_text:
+            limit = PLATFORM_HARD_LIMITS[Platform.VK] - len(link_in_text) - 2
+            text = text[:limit] + "\n\n" + link_in_text
         try:
             response = await client.call(
                 "wall.post",

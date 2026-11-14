@@ -311,24 +311,50 @@ async def test_unexpected_photo_error_stops_publication(publisher, vk, tmp_path)
 
 @pytest.fixture
 def card_publisher(clients) -> VKPublisher:
-    """Публикатор с адресом сайта: для ключа сообщества картинку показывает карточка-ссылка."""
-    return VKPublisher(clients, public_url="https://nexussub.test", secret="test-secret")
+    """Публикатор со ссылкой на страницу поста в тексте (включается флагом card_in_text)."""
+    return VKPublisher(
+        clients, public_url="https://nexussub.test", secret="test-secret", card_in_text=True
+    )
 
 
-async def test_community_key_shows_the_picture_as_a_link_card(card_publisher, vk, tmp_path):
-    """Ключ сообщества не грузит фото (27), а «фото сообщений» ВК молча выбрасывает из записи
-    (проверено на живом ключе 14.11.2026). Картинку показывает карточка-ссылка."""
+async def test_community_key_can_put_a_post_link_into_the_text(card_publisher, vk, tmp_path):
+    """Ключ сообщества не грузит фото (27); вложение-ссылку ВК отвергает («No photo given»), а
+    «фото сообщений» молча выбрасывает. Остаётся ссылка в тексте — только по флагу."""
     vk.restricted = True
     image = tmp_path / "card.png"
     Image.new("RGB", (8, 8)).save(image)
     result = await card_publisher.publish(post(image_path=str(image)), channel())
-    link = vk.params("wall.post")["attachments"]
-    assert link == f"https://nexussub.test/p/{public_posts.make_token('test-secret', 7)}"
+    sent = vk.params("wall.post")
+    link = f"https://nexussub.test/p/{public_posts.make_token('test-secret', 7)}"
+    assert sent["message"] == f"Привет, ВК!\n\n{link}"
+    assert "attachments" not in sent  # ссылку во вложение не кладём
     assert result.note is None
-    assert vk.methods() == ["photos.getWallUploadServer", "wall.post"]  # без «фото сообщений»
+    assert vk.methods() == ["photos.getWallUploadServer", "wall.post"]
     # следующий пост не тратит лишний запрос на заведомый отказ
     await card_publisher.publish(post(id=8, image_path=str(image)), channel())
     assert vk.methods().count("photos.getWallUploadServer") == 1
+
+
+async def test_link_in_text_respects_the_vk_limit(card_publisher, vk, tmp_path):
+    vk.restricted = True
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    await card_publisher.publish(post(text="а" * 20_000, image_path=str(image)), channel())
+    message = vk.params("wall.post")["message"]
+    assert len(message) <= 15_000 and message.rstrip().endswith(
+        public_posts.make_token("test-secret", 7)
+    )
+
+
+async def test_by_default_there_is_no_link_in_the_text(clients, vk, tmp_path):
+    """Без флага ссылка в текст не попадает: текст выходит без картинки, с пояснением."""
+    vk.restricted = True
+    publisher = VKPublisher(clients, public_url="https://nexussub.test", secret="test-secret")
+    image = tmp_path / "card.png"
+    Image.new("RGB", (8, 8)).save(image)
+    result = await publisher.publish(post(image_path=str(image)), channel())
+    assert vk.params("wall.post")["message"] == "Привет, ВК!"
+    assert "без картинки" in result.note
 
 
 async def test_user_token_still_uses_native_photos(card_publisher, vk, tmp_path):
@@ -801,9 +827,9 @@ async def test_miniapp_vk_flow(settings, db, vk):
         assert state["profiles"][0]["vk_channel"] == ""
 
 
-async def test_miniapp_publish_with_community_key_sends_picture_card(settings, db, vk):
-    """Ваш случай: ключ сообщества, пост с картинкой. Картинка выходит карточкой-ссылкой, а
-    правка живой записи (закрыта ВК) даёт понятную ошибку."""
+async def test_miniapp_publish_with_community_key_explains_missing_picture(settings, db, vk):
+    """Ваш случай: ключ сообщества, пост с картинкой. Текст выходит, Mini App объясняет, почему
+    без картинки; правка живой записи (закрыта ВК) даёт понятную ошибку."""
     vk.restricted = True
     settings.bot_token = BOT_TOKEN
     settings.miniapp_open_signup = True
@@ -856,10 +882,8 @@ async def test_miniapp_publish_with_community_key_sends_picture_card(settings, d
             api + "post", headers=headers, json=body(company, copy, "publish")
         )
         assert response.status == 200, await response.text()
-        assert "note" not in await response.json()  # всё вышло полностью
-        assert vk.wall and vk.params("wall.post")["attachments"].startswith(
-            "https://nexussub.test/p/"
-        )
+        assert "без картинки" in (await response.json())["note"]
+        assert vk.wall and "attachments" not in vk.params("wall.post")
 
         # правка живой записи недоступна ключу сообщества — понятная ошибка, текст не меняется
         history = (await (await client.get(api + "history", headers=headers)).json())["posts"]
