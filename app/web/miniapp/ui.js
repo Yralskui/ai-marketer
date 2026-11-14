@@ -1426,6 +1426,7 @@ function management(company) {
             "wallet", () => budgetSheet(company, data)),
         tile("Журнал", "Кто что делал", "history", () => eventsSheet(data)),
         tile("Диагностика", "Канал и расписание", "activity", diagnosticsSheet),
+        tile("ВКонтакте", company.vk_channel || "Подключить сообщество", "megaphone", () => vkSheet(company)),
     );
     if (company.invite_enabled) grid.append(tile("Приглашение", "Ссылка для клиента", "link", () => inviteSheet(company, data)));
     if (company.invite_enabled && data.clients.length) {
